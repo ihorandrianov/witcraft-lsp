@@ -1,0 +1,9 @@
+package wasi:random@0.2.0;
+
+@since(version = 0.2.0)
+interface insecure {
+  @since(version = 0.2.0)
+  get-insecure-random-bytes: func(len: u64) -> list<u8>;
+  @since(version = 0.2.0)
+  get-insecure-random-u64: func() -> u64;
+}

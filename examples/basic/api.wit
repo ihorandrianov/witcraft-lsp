@@ -1,0 +1,36 @@
+package example:api@0.1.0;
+
+interface types {
+    record user {
+        id: u64,
+        name: string,
+        email: string,
+    }
+
+    record post {
+        id: u64,
+        author: user,
+        title: string,
+        content: string,
+    }
+
+    enum status {
+        active,
+        inactive,
+        pending,
+    }
+
+    variant response {
+        success(user),
+        error(string),
+    }
+}
+
+interface api {
+    use types.{user, post, status, response};
+
+    get-user: func(id: u64) -> user;
+    create-user: func(name: , email: string) -> response;
+    list-posts: func(author: user) -> list<post>;
+    get-status: func(id: u64) -> status;
+}

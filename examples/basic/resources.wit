@@ -1,0 +1,80 @@
+package example:resources@0.1.0;
+
+/// Interface demonstrating resource types.
+interface database {
+    /// A database connection resource.
+    resource connection {
+        /// Create a new connection to the database.
+        constructor(url: string);
+
+        /// Execute a query and return results.
+        query: func(sql: string) -> result<query-result, db-error>;
+
+        /// Execute a statement that doesn't return results.
+        execute: func(sql: string) -> result<u64, db-error>;
+
+        /// Begin a transaction.
+        begin-transaction: func() -> result<transaction, db-error>;
+
+        /// Check if the connection is alive.
+        is-connected: func() -> bool;
+
+        /// Static method to get the driver version.
+        get-driver-version: static func() -> string;
+    }
+
+    /// A transaction resource.
+    resource transaction {
+        /// Commit the transaction.
+        commit: func() -> result<_, db-error>;
+
+        /// Rollback the transaction.
+        rollback: func() -> result<_, db-error>;
+
+        /// Execute within the transaction.
+        execute: func(sql: string) -> result<u64, db-error>;
+    }
+
+    /// Query result record.
+    record query-result {
+        columns: list<string>,
+        rows: list<list<value>>,
+        row-count: u64,
+    }
+
+    /// Possible value types from database.
+    variant value {
+        null,
+        integer(s64),
+        real(f64),
+        text(string),
+        blob(list<u8>),
+    }
+
+    /// Database errors.
+    variant db-error {
+        connection-failed(string),
+        query-failed(string),
+        transaction-failed(string),
+    }
+}
+
+/// Interface using borrowed handles.
+interface cache {
+    use database.{connection};
+
+    /// A cache that wraps a database connection.
+    resource cache-layer {
+        /// Create a cache backed by a database connection.
+        constructor(conn: borrow<connection>);
+
+        /// Get a cached value.
+        get: func(key: string) -> option<string>;
+
+        /// Set a cached value with TTL in seconds.
+        set: func(key: string, value: string, ttl: u32);
+
+        /// Invalidate a cache entry.
+        invalidate: func(key: string);
+    }
+}

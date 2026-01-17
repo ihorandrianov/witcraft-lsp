@@ -1,0 +1,41 @@
+package example:types@0.1.0;
+
+/// Basic type definitions for the example package.
+interface types {
+    /// A simple record representing a user.
+    record user {
+        id: u64,
+        name: string,
+        email: option<string>,
+    }
+
+    /// Status of an operation.
+    enum status {
+        pending,
+        active,
+        completed,
+        failed,
+    }
+
+    /// Flags for permissions.
+    flags permissions {
+        read,
+        write,
+        execute,
+        admin,
+    }
+
+    /// A variant representing different error types.
+    variant error {
+        not-found(string),
+        permission-denied,
+        invalid-input(string),
+        internal(string),
+    }
+
+    /// Type alias for a list of users.
+    type user-list = list<user>;
+
+    /// Type alias for operation result.
+    type operation-result = result<user, error>;
+}

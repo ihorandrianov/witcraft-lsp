@@ -1,0 +1,15 @@
+[package]
+name = "witcraft-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WIT (WebAssembly Interface Types) parser and syntax utilities"
+repository = "https://github.com/user/witcraft-lsp"
+keywords = ["wit", "wasm", "webassembly", "parser", "component-model"]
+categories = ["parsing", "wasm", "development-tools"]
+
+[dependencies]
+
+[[bench]]
+name = "parse"
+harness = false

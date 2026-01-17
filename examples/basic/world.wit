@@ -1,0 +1,56 @@
+package example:app@0.1.0;
+
+use example:api@0.1.0.{users, logger};
+use example:resources@0.1.0.{database, cache};
+
+/// The main application world.
+world app {
+    /// Import logging capability from the host.
+    import logger;
+
+    /// Import database access.
+    import database;
+
+    /// Export the user management API.
+    export users;
+
+    /// Export cache functionality.
+    export cache;
+}
+
+/// A simpler world for testing.
+world test-harness {
+    import logger;
+
+    /// Simple test runner interface.
+    export test-runner: interface {
+        record test-result {
+            name: string,
+            passed: bool,
+            message: option<string>,
+        }
+
+        run-tests: func() -> list<test-result>;
+    }
+}
+
+/// World with inline interface definitions.
+world http-handler {
+    /// HTTP request type.
+    export handler: interface {
+        record request {
+            method: string,
+            path: string,
+            headers: list<tuple<string, string>>,
+            body: option<list<u8>>,
+        }
+
+        record response {
+            status: u16,
+            headers: list<tuple<string, string>>,
+            body: option<list<u8>>,
+        }
+
+        handle: func(req: request) -> response;
+    }
+}

@@ -1,0 +1,12 @@
+package example:api@0.1.0;
+
+interface api {
+  use types.{user, post, status};
+
+  get-user: func(id: u64) -> user;
+  create-user: func(name: string, email: string) -> user;
+  list-users: func() -> list<user>;
+  get-post: func(id: u64) -> post;
+  get-status: func(id: u64) -> status;
+  get-unknown: func() -> nonexistent;
+}
