@@ -1,3 +1,6 @@
+/// Average characters per line estimate for pre-allocation.
+const ESTIMATED_CHARS_PER_LINE: usize = 60;
+
 /// A range in the source text, represented as byte offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TextRange {
@@ -74,12 +77,17 @@ pub struct LineIndex {
 
 impl LineIndex {
     pub fn new(text: &str) -> Self {
-        let mut line_starts = vec![0];
+        let estimated_lines = text.len() / ESTIMATED_CHARS_PER_LINE + 1;
+        let mut line_starts = Vec::with_capacity(estimated_lines);
+        line_starts.push(0);
 
-        for (i, c) in text.char_indices() {
-            if c == '\n' {
-                line_starts.push((i + 1) as u32);
-            }
+        // SIMD-accelerated newline search
+        let bytes = text.as_bytes();
+        let mut pos = 0;
+        while let Some(idx) = memchr::memchr(b'\n', &bytes[pos..]) {
+            let absolute_pos = pos + idx + 1;
+            line_starts.push(absolute_pos as u32);
+            pos = absolute_pos;
         }
 
         Self {

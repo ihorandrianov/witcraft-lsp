@@ -1,8 +1,4 @@
-mod document;
-mod server;
-mod workspace;
-
-use server::WitLanguageServer;
+use witcraft_lsp::WitLanguageServer;
 use tower_lsp::{LspService, Server};
 use tracing::info;
 

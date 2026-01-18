@@ -9,6 +9,8 @@ keywords = ["wit", "wasm", "webassembly", "parser", "component-model"]
 categories = ["parsing", "wasm", "development-tools"]
 
 [dependencies]
+memchr = "2"
+smallvec = "1"
 
 [[bench]]
 name = "parse"

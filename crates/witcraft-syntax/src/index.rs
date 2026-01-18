@@ -5,6 +5,7 @@
 use crate::ast::*;
 use crate::TextRange;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Identifies a WIT package by namespace, name, and optional version.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -33,12 +34,12 @@ impl PackageId {
         let namespace = decl
             .namespace
             .iter()
-            .map(|i| i.name.as_str())
+            .map(|i| &*i.name)
             .collect::<Vec<_>>()
             .join(":");
         Self {
             namespace,
-            name: decl.name.name.clone(),
+            name: decl.name.name.to_string(),
             version: decl.version.as_ref().map(|v| (v.major, v.minor, v.patch)),
         }
     }
@@ -57,11 +58,11 @@ impl std::fmt::Display for PackageId {
 /// A symbol definition with file location for cross-file lookups.
 #[derive(Debug, Clone)]
 pub struct GlobalDefinition {
-    pub name: String,
+    pub name: Arc<str>,
     pub kind: DefinitionKind,
     pub range: TextRange,
     pub name_range: TextRange,
-    pub parent: Option<String>,
+    pub parent: Option<Arc<str>>,
     /// URI of the file containing this definition.
     pub uri: String,
 }
@@ -97,19 +98,19 @@ pub enum DefinitionKind {
 /// A symbol definition.
 #[derive(Debug, Clone)]
 pub struct Definition {
-    pub name: String,
+    pub name: Arc<str>,
     pub kind: DefinitionKind,
     pub range: TextRange,
     /// The range of just the name (for highlighting).
     pub name_range: TextRange,
     /// Parent scope (e.g., interface name for functions/types).
-    pub parent: Option<String>,
+    pub parent: Option<Arc<str>>,
 }
 
 /// A symbol reference (where a symbol is used).
 #[derive(Debug, Clone)]
 pub struct Reference {
-    pub name: String,
+    pub name: Arc<str>,
     pub range: TextRange,
     pub kind: ReferenceKind,
 }
@@ -127,11 +128,11 @@ pub enum ReferenceKind {
 #[derive(Debug, Clone)]
 pub struct Import {
     /// The name as it appears in the importing scope (may be aliased).
-    pub local_name: String,
+    pub local_name: Arc<str>,
     /// The original name in the source interface.
-    pub original_name: String,
+    pub original_name: Arc<str>,
     /// The interface being imported from.
-    pub from_interface: String,
+    pub from_interface: Arc<str>,
     /// Range of the local name in the `use` statement.
     pub range: TextRange,
     /// Range of the original name in the `use` statement (before `as` if aliased).
@@ -146,7 +147,7 @@ pub struct Import {
 #[derive(Debug, Default)]
 pub struct SymbolIndex {
     definitions: Vec<Definition>,
-    def_by_name: HashMap<String, usize>,
+    def_by_name: HashMap<Arc<str>, usize>,
     references: Vec<Reference>,
     /// Names imported via `use` statements.
     imports: Vec<Import>,
@@ -200,7 +201,7 @@ impl SymbolIndex {
 
     /// Find an import by its local name.
     pub fn find_import(&self, local_name: &str) -> Option<&Import> {
-        self.imports.iter().find(|i| i.local_name == local_name)
+        self.imports.iter().find(|i| &*i.local_name == local_name)
     }
 
     pub fn definition_at(&self, offset: u32) -> Option<&Definition> {
@@ -266,7 +267,7 @@ impl SymbolIndex {
         }
     }
 
-    fn index_typedef(&mut self, typedef: &TypeDef, parent: Option<String>) {
+    fn index_typedef(&mut self, typedef: &TypeDef, parent: Option<Arc<str>>) {
         let (name, kind, range, name_range) = match typedef {
             TypeDef::Alias(a) => {
                 self.index_type(&a.ty);
@@ -333,9 +334,9 @@ impl SymbolIndex {
         });
     }
 
-    fn index_resource(&mut self, resource: &ResourceDecl, parent: Option<String>) {
-        let resource_parent = parent
-            .map(|p| format!("{}.{}", p, resource.name.name))
+    fn index_resource(&mut self, resource: &ResourceDecl, parent: Option<Arc<str>>) {
+        let resource_parent: Arc<str> = parent
+            .map(|p| Arc::from(format!("{}.{}", p, resource.name.name)))
             .unwrap_or_else(|| resource.name.name.clone());
 
         for item in &resource.items {
@@ -369,7 +370,7 @@ impl SymbolIndex {
         }
     }
 
-    fn index_func(&mut self, func: &FuncDecl, parent: Option<String>) {
+    fn index_func(&mut self, func: &FuncDecl, parent: Option<Arc<str>>) {
         self.add_definition(Definition {
             name: func.name.name.clone(),
             kind: DefinitionKind::Function,
@@ -518,7 +519,7 @@ impl SymbolIndex {
         for (name, defs) in by_name {
             if defs.len() > 1 {
                 // Group by parent scope to find duplicates in same scope
-                let mut by_scope: HashMap<Option<&String>, Vec<&Definition>> = HashMap::new();
+                let mut by_scope: HashMap<Option<&Arc<str>>, Vec<&Definition>> = HashMap::new();
                 for def in defs {
                     by_scope.entry(def.parent.as_ref()).or_default().push(def);
                 }
@@ -554,7 +555,7 @@ impl SymbolIndex {
 
             if !is_used {
                 unused.push(UnusedImport {
-                    name: import.local_name.clone(),
+                    name: import.local_name.to_string(),
                     range: import.range,
                 });
             }
@@ -601,7 +602,7 @@ mod tests {
 
         let func = index.find_definition("get-user").unwrap();
         assert_eq!(func.kind, DefinitionKind::Function);
-        assert_eq!(func.parent, Some("api".to_string()));
+        assert_eq!(func.parent.as_deref(), Some("api"));
     }
 
     #[test]
@@ -621,7 +622,7 @@ mod tests {
         let refs: Vec<_> = index
             .references()
             .iter()
-            .filter(|r| r.name == "user")
+            .filter(|r| &*r.name == "user")
             .collect();
         assert_eq!(refs.len(), 1);
 
@@ -641,7 +642,7 @@ mod tests {
 
         // Should find definition when clicking on the name
         let def = index.definition_at(user_def.name_range.start()).unwrap();
-        assert_eq!(def.name, "user");
+        assert_eq!(def.name.as_ref(), "user");
     }
 
     #[test]
@@ -657,14 +658,14 @@ mod tests {
         let index = SymbolIndex::build(&result.root);
 
         // Find the reference to `user` in the return type
-        let user_refs: Vec<_> = index.references().iter().filter(|r| r.name == "user").collect();
+        let user_refs: Vec<_> = index.references().iter().filter(|r| &*r.name == "user").collect();
         assert_eq!(user_refs.len(), 1);
 
         let user_ref = user_refs[0];
 
         // Clicking on the reference should find the definition
         let def = index.definition_at(user_ref.range.start()).unwrap();
-        assert_eq!(def.name, "user");
+        assert_eq!(def.name.as_ref(), "user");
         assert_eq!(def.kind, DefinitionKind::Record);
     }
 
@@ -699,7 +700,7 @@ interface api {
         assert!(index.find_definition("get-user").is_some());
 
         // Should have references to user (in post.author, response.success, api.get-user return)
-        let user_refs: Vec<_> = index.references().iter().filter(|r| r.name == "user").collect();
+        let user_refs: Vec<_> = index.references().iter().filter(|r| &*r.name == "user").collect();
         assert_eq!(user_refs.len(), 3);
     }
 
@@ -715,7 +716,7 @@ interface api {
         let user_refs: Vec<_> = index
             .references()
             .iter()
-            .filter(|r| r.name == "user" && r.kind == ReferenceKind::Type)
+            .filter(|r| &*r.name == "user" && r.kind == ReferenceKind::Type)
             .collect();
         assert_eq!(user_refs.len(), 1, "should have 1 reference to 'user'");
 

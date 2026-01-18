@@ -70,7 +70,7 @@ impl PackageIndex {
             let global_def = GlobalDefinition::from_definition(def, uri);
 
             self.definitions
-                .entry(def.name.clone())
+                .entry(def.name.to_string())
                 .or_default()
                 .push(global_def);
 
@@ -81,9 +81,9 @@ impl PackageIndex {
             } else if let Some(parent) = &def.parent {
                 // This is a type/func inside an interface - it's an export
                 self.interface_exports
-                    .entry(parent.clone())
+                    .entry(parent.to_string())
                     .or_default()
-                    .insert(def.name.clone());
+                    .insert(def.name.to_string());
             }
         }
 
@@ -127,7 +127,7 @@ impl PackageIndex {
             .values()
             .flatten()
             .filter(|d| d.kind == DefinitionKind::Interface)
-            .map(|d| d.name.clone())
+            .map(|d| d.name.to_string())
             .collect()
     }
 }
@@ -135,11 +135,12 @@ impl PackageIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use witcraft_syntax::{parse, Definition, TextRange};
 
     fn make_definition(name: &str, kind: DefinitionKind) -> Definition {
         Definition {
-            name: name.to_string(),
+            name: Arc::from(name),
             kind,
             range: TextRange::new(0, 10),
             name_range: TextRange::new(0, name.len() as u32),

@@ -792,6 +792,10 @@ dependencies = [
 [[package]]
 name = "witcraft-syntax"
 version = "0.1.0"
+dependencies = [
+ "memchr",
+ "smallvec",
+]
 
 [[package]]
 name = "writeable"

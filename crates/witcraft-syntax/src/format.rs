@@ -73,7 +73,6 @@ impl<'a> Formatter<'a> {
     pub fn format_with_comments(source: &'a str, result: &ParseResult) -> String {
         let mut f = Self::with_comments(source, &result.tokens);
         f.format_source_file(&result.root);
-        // Emit any trailing comments at the end
         f.emit_remaining_comments();
         f.output
     }
@@ -163,7 +162,6 @@ impl<'a> Formatter<'a> {
     }
 
     fn format_source_file(&mut self, source: &SourceFile) {
-        // Package declaration
         if let Some(pkg) = &source.package {
             self.emit_comments_before(pkg.range.start());
             self.format_package_decl(pkg);
@@ -172,12 +170,8 @@ impl<'a> Formatter<'a> {
             }
         }
 
-        // Top-level uses
-        for (i, use_stmt) in source.uses.iter().enumerate() {
+        for use_stmt in &source.uses {
             self.emit_comments_before(use_stmt.range.start());
-            if i > 0 {
-                // No blank lines between consecutive uses
-            }
             self.format_top_level_use(use_stmt);
         }
 
@@ -185,7 +179,6 @@ impl<'a> Formatter<'a> {
             self.newline();
         }
 
-        // Items
         for (i, item) in source.items.iter().enumerate() {
             self.emit_comments_before(item.range().start());
             if i > 0 {
@@ -194,7 +187,6 @@ impl<'a> Formatter<'a> {
             self.format_item(item);
         }
 
-        // Nested packages
         for (i, nested) in source.nested_packages.iter().enumerate() {
             self.emit_comments_before(nested.range.start());
             if i > 0 || !source.items.is_empty() {
@@ -247,7 +239,6 @@ impl<'a> Formatter<'a> {
         self.write_indent();
         self.write("package ");
 
-        // Namespace segments
         for (i, ns) in pkg.namespace.iter().enumerate() {
             if i > 0 {
                 self.write(":");
@@ -257,13 +248,11 @@ impl<'a> Formatter<'a> {
         self.write(":");
         self.write(&pkg.name.name);
 
-        // Nested segments
         for nested in &pkg.nested {
             self.write("/");
             self.write(&nested.name);
         }
 
-        // Version
         if let Some(ver) = &pkg.version {
             self.write("@");
             self.format_version(ver);
@@ -283,7 +272,6 @@ impl<'a> Formatter<'a> {
         self.write_indent();
         self.write("package ");
 
-        // Namespace segments
         for (i, ns) in nested.package.namespace.iter().enumerate() {
             if i > 0 {
                 self.write(":");
@@ -1078,8 +1066,6 @@ interface api {
         );
     }
 
-    // ==================== Comment preservation tests ====================
-
     fn format_with_comments_str(input: &str) -> String {
         let result = parse(input);
         Formatter::format_with_comments(input, &result)
@@ -1173,8 +1159,6 @@ interface api {
         let second = format_with_comments_str(&first);
         assert_eq!(first, second, "Comment-preserving formatting should be idempotent");
     }
-
-    // ==================== Trailing comment tests ====================
 
     #[test]
     fn format_preserves_trailing_comments_in_record() {

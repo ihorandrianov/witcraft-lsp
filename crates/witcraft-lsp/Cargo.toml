@@ -8,6 +8,14 @@ repository = "https://github.com/user/witcraft-lsp"
 keywords = ["wit", "wasm", "webassembly", "lsp", "language-server"]
 categories = ["development-tools", "wasm"]
 
+[lib]
+name = "witcraft_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "witcraft-lsp"
+path = "src/main.rs"
+
 [dependencies]
 witcraft-syntax.workspace = true
 tower-lsp.workspace = true

@@ -9,7 +9,7 @@ mod package_index;
 mod resolver;
 
 pub use package_index::PackageIndex;
-pub use resolver::{CrossFileResolver, ResolveResult};
+pub use resolver::{AvailableType, CrossFileResolver, ResolveResult, SimilarName, UndefinedType};
 
 use dashmap::DashMap;
 use std::collections::HashSet;

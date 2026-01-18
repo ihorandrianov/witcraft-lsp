@@ -5,11 +5,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum SyntaxKind {
-    // ==========
-    // Tokens
-    // ==========
-
-    // Keywords
     PackageKw,
     WorldKw,
     InterfaceKw,
@@ -33,7 +28,6 @@ pub enum SyntaxKind {
     AsyncKw,
     FromKw,
 
-    // Builtin types
     BoolKw,
     U8Kw,
     U16Kw,
@@ -54,42 +48,34 @@ pub enum SyntaxKind {
     FutureKw,
     StreamKw,
 
-    // Punctuation
-    LBrace,    // {
-    RBrace,    // }
-    LParen,    // (
-    RParen,    // )
-    LAngle,    // <
-    RAngle,    // >
-    Comma,     // ,
-    Colon,     // :
-    Semicolon, // ;
-    Eq,        // =
-    Dot,       // .
-    At,        // @
-    Slash,     // /
-    Minus,     // -
-    Arrow,     // ->
-    Star,      // *
-    Underscore, // _
+    LBrace,
+    RBrace,
+    LParen,
+    RParen,
+    LAngle,
+    RAngle,
+    Comma,
+    Colon,
+    Semicolon,
+    Eq,
+    Dot,
+    At,
+    Slash,
+    Minus,
+    Arrow,
+    Star,
+    Underscore,
 
-    // Literals and identifiers
     Ident,
     Integer,
 
-    // Trivia (preserved for formatting, ignored by parser)
     Whitespace,
     LineComment,
     DocComment,
     BlockComment,
 
-    // Special
     Error,
     Eof,
-
-    // ==========
-    // Composite nodes (added by parser)
-    // ==========
     SourceFile,
 }
 

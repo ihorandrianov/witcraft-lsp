@@ -2,15 +2,16 @@ use crate::ast::*;
 use crate::lexer::{lex, Token};
 use crate::parse::{ErrorKind, ParseError, ParseResult};
 use crate::{SyntaxKind, TextRange};
+use smallvec::smallvec;
 
 pub fn parse(source: &str) -> ParseResult {
     let tokens = lex(source);
-    let mut parser = Parser::new(source, tokens.clone());
+    let mut parser = Parser::new(source, tokens);
     let root = parser.parse_source_file();
     ParseResult {
         root,
         errors: parser.errors,
-        tokens,
+        tokens: parser.tokens,
     }
 }
 
@@ -18,33 +19,44 @@ struct Parser<'a> {
     source: &'a str,
     tokens: Vec<Token>,
     pos: usize,
+    current_cache: Token,
     errors: Vec<ParseError>,
 }
 
 impl<'a> Parser<'a> {
     fn new(source: &'a str, tokens: Vec<Token>) -> Self {
+        let eof = Token {
+            kind: SyntaxKind::Eof,
+            range: TextRange::new(source.len() as u32, source.len() as u32),
+        };
+        let current_cache = Self::find_non_trivia(&tokens, 0).unwrap_or(eof);
         Self {
             source,
             tokens,
             pos: 0,
+            current_cache,
             errors: Vec::new(),
         }
     }
 
+    fn find_non_trivia(tokens: &[Token], start: usize) -> Option<Token> {
+        tokens[start..].iter().find(|t| !t.kind.is_trivia()).copied()
+    }
+
     fn current(&self) -> Token {
-        self.skip_trivia_peek(0)
+        self.current_cache
     }
 
     fn at(&self, kind: SyntaxKind) -> bool {
-        self.current().kind == kind
+        self.current_cache.kind == kind
     }
 
     fn at_any(&self, kinds: &[SyntaxKind]) -> bool {
-        kinds.contains(&self.current().kind)
+        kinds.contains(&self.current_cache.kind)
     }
 
     fn at_eof(&self) -> bool {
-        self.at(SyntaxKind::Eof)
+        self.current_cache.kind == SyntaxKind::Eof
     }
 
     fn skip_trivia_peek(&self, mut n: usize) -> Token {
@@ -77,6 +89,10 @@ impl<'a> Parser<'a> {
         if self.pos < self.tokens.len() {
             let tok = self.tokens[self.pos];
             self.pos += 1;
+            self.current_cache = Self::find_non_trivia(&self.tokens, self.pos).unwrap_or(Token {
+                kind: SyntaxKind::Eof,
+                range: TextRange::new(self.source.len() as u32, self.source.len() as u32),
+            });
             tok
         } else {
             Token {
@@ -105,6 +121,16 @@ impl<'a> Parser<'a> {
                 cur.range,
                 ErrorKind::ExpectedToken(kind),
             ));
+            None
+        }
+    }
+
+    fn expect_closing(&mut self, close: SyntaxKind, construct: &str, opened_at: TextRange) -> Option<Token> {
+        if self.at(close) {
+            Some(self.bump())
+        } else {
+            let cur = self.current();
+            self.errors.push(ParseError::unclosed(construct, opened_at, cur.range));
             None
         }
     }
@@ -219,8 +245,6 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // ==================== Top Level ====================
-
     fn parse_source_file(&mut self) -> SourceFile {
         let start = self.current().range.start();
 
@@ -231,7 +255,6 @@ impl<'a> Parser<'a> {
 
         if self.at(SyntaxKind::PackageKw) {
             let docs = self.collect_doc_comment();
-            // Check if this is a nested package (has `{`) or standalone (has `;`)
             if self.is_nested_package() {
                 nested_packages.push(self.parse_nested_package(docs));
             } else {
@@ -250,14 +273,12 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            // Handle top-level use statements
             if self.at(SyntaxKind::UseKw) {
                 let docs = self.collect_doc_comment();
                 uses.push(self.parse_top_level_use(docs));
                 continue;
             }
 
-            // Handle nested package definitions
             if self.at(SyntaxKind::PackageKw) {
                 let docs = self.collect_doc_comment();
                 nested_packages.push(self.parse_nested_package(docs));
@@ -298,21 +319,14 @@ impl<'a> Parser<'a> {
     /// Check if the current `package` keyword starts a nested package definition.
     /// Returns true if it's followed by `namespace:name { ... }` pattern.
     fn is_nested_package(&self) -> bool {
-        // Look ahead past the package header to find either `;` or `{`
         let mut depth = 0;
-        let mut i = 1; // Start after 'package'
+        let mut i = 1;
 
         loop {
             let kind = self.peek(i).kind;
             match kind {
-                SyntaxKind::LBrace => {
-                    // Found `{` - this is a nested package
-                    return depth == 0;
-                }
-                SyntaxKind::Semicolon => {
-                    // Found `;` - this is a standalone package decl
-                    return false;
-                }
+                SyntaxKind::LBrace => return depth == 0,
+                SyntaxKind::Semicolon => return false,
                 SyntaxKind::LAngle => {
                     depth += 1;
                     i += 1;
@@ -337,14 +351,10 @@ impl<'a> Parser<'a> {
     /// Grammar: `'package' ( id ':' )+ id ( '/' id )* ('@' valid-semver)?`
     ///
     /// Returns (namespace_segments, name, nested_segments, version, start_pos, docs)
-    fn parse_package_header(&mut self, docs: Option<DocComment>) -> (Vec<Ident>, Ident, Vec<Ident>, Option<Version>, u32, Option<DocComment>) {
-        let start = self.bump().range.start(); // consume 'package'
+    fn parse_package_header(&mut self, docs: Option<DocComment>) -> (SmallVec2<Ident>, Ident, SmallVec2<Ident>, Option<Version>, u32, Option<DocComment>) {
+        let start = self.bump().range.start();
 
-        // Parse ( id ':' )+ id pattern
-        // We need at least one namespace segment followed by `:`, then the name
-        let mut segments = Vec::new();
-
-        // Parse first segment (required)
+        let mut segments: SmallVec2<Ident> = smallvec![];
         let first = if self.at(SyntaxKind::Ident) {
             self.parse_ident().unwrap()
         } else {
@@ -353,12 +363,10 @@ impl<'a> Parser<'a> {
         };
         segments.push(first);
 
-        // Expect at least one colon
         if !self.eat(SyntaxKind::Colon).is_some() {
             self.error_expected("`:` after namespace");
         }
 
-        // Continue parsing `id :` pairs until we find an id not followed by `:`
         loop {
             let ident = if self.at(SyntaxKind::Ident) {
                 self.parse_ident().unwrap()
@@ -370,18 +378,13 @@ impl<'a> Parser<'a> {
                 Ident::new("", TextRange::new(self.current().range.start(), self.current().range.start()))
             };
 
-            // Check if this is followed by `:` (more namespace segments) or not (this is the name)
             if self.eat(SyntaxKind::Colon).is_some() {
-                // This was a namespace segment, continue
                 segments.push(ident);
             } else {
-                // This is the final name
-                // All previous segments are namespace, this one is the name
                 let namespace = segments;
                 let name = ident;
 
-                // Parse optional nested package segments: ( '/' id )*
-                let mut nested = Vec::new();
+                let mut nested: SmallVec2<Ident> = smallvec![];
                 while self.eat(SyntaxKind::Slash).is_some() {
                     if self.at(SyntaxKind::Ident) {
                         nested.push(self.parse_ident().unwrap());
@@ -391,7 +394,6 @@ impl<'a> Parser<'a> {
                     }
                 }
 
-                // Parse optional version
                 let version = if self.at(SyntaxKind::At) {
                     Some(self.parse_version())
                 } else if self.at(SyntaxKind::Integer) || self.at(SyntaxKind::Dot) {
@@ -430,7 +432,6 @@ impl<'a> Parser<'a> {
     fn parse_nested_package(&mut self, docs: Option<DocComment>) -> NestedPackage {
         let (namespace, name, nested, version, start, docs) = self.parse_package_header(docs);
 
-        // The package decl ends before the brace
         let pkg_end = self.current().range.start();
         let package = PackageDecl {
             docs,
@@ -443,14 +444,12 @@ impl<'a> Parser<'a> {
 
         self.expect(SyntaxKind::LBrace);
 
-        // Parse uses inside the nested package
         let mut uses = Vec::new();
         while self.at(SyntaxKind::UseKw) {
             let docs = self.collect_doc_comment();
             uses.push(self.parse_top_level_use(docs));
         }
 
-        // Parse items inside the nested package
         let mut items = Vec::new();
         while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
             let gates = self.parse_gates();
@@ -613,8 +612,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ==================== Interface ====================
-
     fn parse_interface_decl(&mut self, gates: Gates, docs: Option<DocComment>) -> InterfaceDecl {
         let start = self.bump().range.start();
         let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
@@ -636,9 +633,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.expect(SyntaxKind::RBrace)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| lbrace.map(|t| t.range.end()).unwrap_or(start));
+        let end = if let Some(open) = lbrace {
+            self.expect_closing(SyntaxKind::RBrace, "interface", open.range)
+        } else {
+            self.expect(SyntaxKind::RBrace)
+        }.map(|t| t.range.end()).unwrap_or(start);
 
         InterfaceDecl {
             gates,
@@ -665,7 +664,7 @@ impl<'a> Parser<'a> {
         let start = self.bump().range.start();
         let path = self.parse_use_path();
 
-        let mut names = Vec::new();
+        let mut names: SmallVec4<UseNameItem> = smallvec![];
         if self.at(SyntaxKind::Dot) {
             self.bump();
             self.expect(SyntaxKind::LBrace);
@@ -712,8 +711,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ==================== World ====================
-
     fn parse_world_decl(&mut self, gates: Gates, docs: Option<DocComment>) -> WorldDecl {
         let start = self.bump().range.start();
         let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
@@ -733,9 +730,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.expect(SyntaxKind::RBrace)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| lbrace.map(|t| t.range.end()).unwrap_or(start));
+        let end = if let Some(open) = lbrace {
+            self.expect_closing(SyntaxKind::RBrace, "world", open.range)
+        } else {
+            self.expect(SyntaxKind::RBrace)
+        }.map(|t| t.range.end()).unwrap_or(start);
 
         WorldDecl {
             gates,
@@ -915,12 +914,11 @@ impl<'a> Parser<'a> {
         let start = self.bump().range.start();
         let path = self.parse_use_path();
 
-        // Check for optional 'with' clause
-        let with = if self.at(SyntaxKind::WithKw) {
-            self.bump(); // consume 'with'
+        let with: SmallVec4<IncludeNameItem> = if self.at(SyntaxKind::WithKw) {
+            self.bump();
             self.expect(SyntaxKind::LBrace);
 
-            let mut items = Vec::new();
+            let mut items: SmallVec4<IncludeNameItem> = smallvec![];
             while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
                 items.push(self.parse_include_name_item());
                 if self.eat(SyntaxKind::Comma).is_none() {
@@ -931,7 +929,7 @@ impl<'a> Parser<'a> {
             self.expect(SyntaxKind::RBrace);
             items
         } else {
-            Vec::new()
+            smallvec![]
         };
 
         let end = self.expect(SyntaxKind::Semicolon)
@@ -964,8 +962,6 @@ impl<'a> Parser<'a> {
             range: TextRange::new(start, end),
         }
     }
-
-    // ==================== Type Definitions ====================
 
     fn parse_typedef(&mut self, gates: Gates, docs: Option<DocComment>) -> TypeDef {
         match self.current().kind {
@@ -1014,8 +1010,8 @@ impl<'a> Parser<'a> {
         let start = self.bump().range.start();
         let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
-        self.expect(SyntaxKind::LBrace);
-        let mut fields = Vec::new();
+        let lbrace = self.expect(SyntaxKind::LBrace);
+        let mut fields: SmallVec8<RecordField> = smallvec![];
 
         while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
             let docs = self.collect_doc_comment();
@@ -1025,9 +1021,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.expect(SyntaxKind::RBrace)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| name.range.end());
+        let end = if let Some(open) = lbrace {
+            self.expect_closing(SyntaxKind::RBrace, "record", open.range)
+        } else {
+            self.expect(SyntaxKind::RBrace)
+        }.map(|t| t.range.end()).unwrap_or_else(|| name.range.end());
 
         RecordDecl {
             gates,
@@ -1056,8 +1054,8 @@ impl<'a> Parser<'a> {
         let start = self.bump().range.start();
         let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
-        self.expect(SyntaxKind::LBrace);
-        let mut cases = Vec::new();
+        let lbrace = self.expect(SyntaxKind::LBrace);
+        let mut cases: SmallVec8<VariantCase> = smallvec![];
 
         while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
             let docs = self.collect_doc_comment();
@@ -1067,9 +1065,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.expect(SyntaxKind::RBrace)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| name.range.end());
+        let end = if let Some(open) = lbrace {
+            self.expect_closing(SyntaxKind::RBrace, "variant", open.range)
+        } else {
+            self.expect(SyntaxKind::RBrace)
+        }.map(|t| t.range.end()).unwrap_or_else(|| name.range.end());
 
         VariantDecl {
             gates,
@@ -1110,8 +1110,8 @@ impl<'a> Parser<'a> {
         let start = self.bump().range.start();
         let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
-        self.expect(SyntaxKind::LBrace);
-        let mut cases = Vec::new();
+        let lbrace = self.expect(SyntaxKind::LBrace);
+        let mut cases: SmallVec8<EnumCase> = smallvec![];
 
         while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
             let docs = self.collect_doc_comment();
@@ -1127,9 +1127,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.expect(SyntaxKind::RBrace)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| name.range.end());
+        let end = if let Some(open) = lbrace {
+            self.expect_closing(SyntaxKind::RBrace, "enum", open.range)
+        } else {
+            self.expect(SyntaxKind::RBrace)
+        }.map(|t| t.range.end()).unwrap_or_else(|| name.range.end());
 
         EnumDecl {
             gates,
@@ -1144,8 +1146,8 @@ impl<'a> Parser<'a> {
         let start = self.bump().range.start();
         let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
-        self.expect(SyntaxKind::LBrace);
-        let mut flags = Vec::new();
+        let lbrace = self.expect(SyntaxKind::LBrace);
+        let mut flags: SmallVec8<FlagCase> = smallvec![];
 
         while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
             let docs = self.collect_doc_comment();
@@ -1161,9 +1163,11 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.expect(SyntaxKind::RBrace)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| name.range.end());
+        let end = if let Some(open) = lbrace {
+            self.expect_closing(SyntaxKind::RBrace, "flags", open.range)
+        } else {
+            self.expect(SyntaxKind::RBrace)
+        }.map(|t| t.range.end()).unwrap_or_else(|| name.range.end());
 
         FlagsDecl {
             gates,
@@ -1181,7 +1185,7 @@ impl<'a> Parser<'a> {
         let mut items = Vec::new();
 
         if self.at(SyntaxKind::LBrace) {
-            self.bump();
+            let open_tok = self.bump();
 
             while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
                 let item_gates = self.parse_gates();
@@ -1195,9 +1199,8 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            self.expect(SyntaxKind::RBrace);
+            self.expect_closing(SyntaxKind::RBrace, "resource", open_tok.range);
         } else {
-            // Opaque resource declaration: `resource name;`
             self.expect(SyntaxKind::Semicolon);
         }
 
@@ -1257,7 +1260,7 @@ impl<'a> Parser<'a> {
         let start = self.bump().range.start();
         self.expect(SyntaxKind::LParen);
 
-        let mut params = Vec::new();
+        let mut params: SmallVec4<Param> = smallvec![];
         while !self.at(SyntaxKind::RParen) && !self.at_eof() {
             params.push(self.parse_param());
             if !self.eat(SyntaxKind::Comma).is_some() {
@@ -1287,8 +1290,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // ==================== Functions ====================
-
     fn parse_func_decl(&mut self, gates: Gates, docs: Option<DocComment>) -> FuncDecl {
         let start = self.current().range.start();
         let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
@@ -1310,7 +1311,6 @@ impl<'a> Parser<'a> {
     fn parse_func_signature(&mut self) -> FuncSignature {
         let start = self.current().range.start();
 
-        // Check for optional 'async' keyword
         let is_async = if self.at(SyntaxKind::AsyncKw) {
             self.bump();
             true
@@ -1321,7 +1321,7 @@ impl<'a> Parser<'a> {
         self.expect(SyntaxKind::FuncKw);
         self.expect(SyntaxKind::LParen);
 
-        let mut params = Vec::new();
+        let mut params: SmallVec4<Param> = smallvec![];
         while !self.at(SyntaxKind::RParen) && !self.at_eof() {
             // Skip any error tokens before trying to parse a param
             while self.at(SyntaxKind::Error) {
@@ -1390,7 +1390,7 @@ impl<'a> Parser<'a> {
     fn parse_func_results(&mut self) -> FuncResults {
         if self.at(SyntaxKind::LParen) {
             self.bump();
-            let mut params = Vec::new();
+            let mut params: SmallVec4<Param> = smallvec![];
             while !self.at(SyntaxKind::RParen) && !self.at_eof() {
                 params.push(self.parse_param());
                 if !self.eat(SyntaxKind::Comma).is_some() {
@@ -1403,8 +1403,6 @@ impl<'a> Parser<'a> {
             FuncResults::Anon(self.parse_type())
         }
     }
-
-    // ==================== Types ====================
 
     fn parse_type(&mut self) -> Type {
         let start = self.current().range.start();
@@ -1462,11 +1460,13 @@ impl<'a> Parser<'a> {
 
     fn parse_list_type(&mut self) -> Type {
         let start = self.bump().range.start();
-        self.expect(SyntaxKind::LAngle);
+        let open = self.expect(SyntaxKind::LAngle);
         let element = self.parse_type();
-        let end = self.expect(SyntaxKind::RAngle)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| element.range().end());
+        let end = if let Some(open_tok) = open {
+            self.expect_closing(SyntaxKind::RAngle, "list<>", open_tok.range)
+        } else {
+            self.expect(SyntaxKind::RAngle)
+        }.map(|t| t.range.end()).unwrap_or_else(|| element.range().end());
 
         Type::List(Box::new(ListType {
             element,
@@ -1476,11 +1476,13 @@ impl<'a> Parser<'a> {
 
     fn parse_option_type(&mut self) -> Type {
         let start = self.bump().range.start();
-        self.expect(SyntaxKind::LAngle);
+        let open = self.expect(SyntaxKind::LAngle);
         let inner = self.parse_type();
-        let end = self.expect(SyntaxKind::RAngle)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| inner.range().end());
+        let end = if let Some(open_tok) = open {
+            self.expect_closing(SyntaxKind::RAngle, "option<>", open_tok.range)
+        } else {
+            self.expect(SyntaxKind::RAngle)
+        }.map(|t| t.range.end()).unwrap_or_else(|| inner.range().end());
 
         Type::Option(Box::new(OptionType {
             inner,
@@ -1501,7 +1503,7 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        self.bump();
+        let open_tok = self.bump();
 
         let ok = if self.at(SyntaxKind::Underscore) {
             self.bump();
@@ -1517,7 +1519,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let end = self.expect(SyntaxKind::RAngle)
+        let end = self.expect_closing(SyntaxKind::RAngle, "result<>", open_tok.range)
             .map(|t| t.range.end())
             .unwrap_or_else(|| {
                 err.as_ref().map(|e| e.range().end())
@@ -1534,9 +1536,9 @@ impl<'a> Parser<'a> {
 
     fn parse_tuple_type(&mut self) -> Type {
         let start = self.bump().range.start();
-        self.expect(SyntaxKind::LAngle);
+        let open = self.expect(SyntaxKind::LAngle);
 
-        let mut elements = Vec::new();
+        let mut elements: SmallVec4<Type> = smallvec![];
         while !self.at(SyntaxKind::RAngle) && !self.at_eof() {
             elements.push(self.parse_type());
             if !self.eat(SyntaxKind::Comma).is_some() {
@@ -1544,25 +1546,29 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.expect(SyntaxKind::RAngle)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| elements.last()
-                .map(|e| e.range().end())
-                .unwrap_or(start));
+        let end = if let Some(open_tok) = open {
+            self.expect_closing(SyntaxKind::RAngle, "tuple<>", open_tok.range)
+        } else {
+            self.expect(SyntaxKind::RAngle)
+        }.map(|t| t.range.end()).unwrap_or_else(|| elements.last()
+            .map(|e| e.range().end())
+            .unwrap_or(start));
 
-        Type::Tuple(TupleType {
+        Type::Tuple(Box::new(TupleType {
             elements,
             range: TextRange::new(start, end),
-        })
+        }))
     }
 
     fn parse_borrow_type(&mut self) -> Type {
         let start = self.bump().range.start();
-        self.expect(SyntaxKind::LAngle);
+        let open = self.expect(SyntaxKind::LAngle);
         let resource = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
-        let end = self.expect(SyntaxKind::RAngle)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| resource.range.end());
+        let end = if let Some(open_tok) = open {
+            self.expect_closing(SyntaxKind::RAngle, "borrow<>", open_tok.range)
+        } else {
+            self.expect(SyntaxKind::RAngle)
+        }.map(|t| t.range.end()).unwrap_or_else(|| resource.range.end());
 
         Type::Borrow(Box::new(HandleType {
             resource,
@@ -1572,11 +1578,13 @@ impl<'a> Parser<'a> {
 
     fn parse_own_type(&mut self) -> Type {
         let start = self.bump().range.start();
-        self.expect(SyntaxKind::LAngle);
+        let open = self.expect(SyntaxKind::LAngle);
         let resource = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
-        let end = self.expect(SyntaxKind::RAngle)
-            .map(|t| t.range.end())
-            .unwrap_or_else(|| resource.range.end());
+        let end = if let Some(open_tok) = open {
+            self.expect_closing(SyntaxKind::RAngle, "own<>", open_tok.range)
+        } else {
+            self.expect(SyntaxKind::RAngle)
+        }.map(|t| t.range.end()).unwrap_or_else(|| resource.range.end());
 
         Type::Own(Box::new(HandleType {
             resource,
@@ -1585,10 +1593,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_future_type(&mut self) -> Type {
-        let start = self.bump().range.start(); // consume 'future'
+        let start = self.bump().range.start();
 
         if !self.at(SyntaxKind::LAngle) {
-            // Bare `future` without type parameter
             return Type::Future(Box::new(FutureType {
                 inner: None,
                 range: TextRange::new(start, self.tokens.get(self.pos.saturating_sub(1))
@@ -1597,9 +1604,9 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        self.bump(); // consume '<'
+        let open_tok = self.bump();
         let inner = self.parse_type();
-        let end = self.expect(SyntaxKind::RAngle)
+        let end = self.expect_closing(SyntaxKind::RAngle, "future<>", open_tok.range)
             .map(|t| t.range.end())
             .unwrap_or_else(|| inner.range().end());
 
@@ -1610,10 +1617,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stream_type(&mut self) -> Type {
-        let start = self.bump().range.start(); // consume 'stream'
+        let start = self.bump().range.start();
 
         if !self.at(SyntaxKind::LAngle) {
-            // Bare `stream` without type parameter
             return Type::Stream(Box::new(StreamType {
                 inner: None,
                 range: TextRange::new(start, self.tokens.get(self.pos.saturating_sub(1))
@@ -1622,9 +1628,9 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        self.bump(); // consume '<'
+        let open_tok = self.bump();
         let inner = self.parse_type();
-        let end = self.expect(SyntaxKind::RAngle)
+        let end = self.expect_closing(SyntaxKind::RAngle, "stream<>", open_tok.range)
             .map(|t| t.range.end())
             .unwrap_or_else(|| inner.range().end());
 
@@ -1634,11 +1640,9 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    // ==================== Feature Gates ====================
-
     /// Parse zero or more feature gates: @since(version = x.y.z) @unstable(feature = foo)
     fn parse_gates(&mut self) -> Gates {
-        let mut gates = Vec::new();
+        let mut gates: SmallVec2<Gate> = smallvec![];
 
         while self.at(SyntaxKind::At) {
             if let Some(gate) = self.parse_gate() {
@@ -1657,7 +1661,7 @@ impl<'a> Parser<'a> {
         if !self.at(SyntaxKind::At) {
             return None;
         }
-        self.bump(); // consume '@'
+        self.bump();
 
         let keyword = self.parse_ident()?;
 
@@ -1665,9 +1669,9 @@ impl<'a> Parser<'a> {
             self.error_expected("'(' after gate keyword");
             return None;
         }
-        self.bump(); // consume '('
+        self.bump();
 
-        let gate = match keyword.name.as_str() {
+        let gate = match &*keyword.name {
             "since" => {
                 // Parse: version = x.y.z
                 self.expect_keyword_ident("version");
@@ -1750,8 +1754,6 @@ impl<'a> Parser<'a> {
         Version { major, minor, patch, range: TextRange::new(start, end) }
     }
 
-    // ==================== Utilities ====================
-
     fn parse_ident(&mut self) -> Option<Ident> {
         if self.at(SyntaxKind::Ident) {
             let tok = self.bump();
@@ -1780,8 +1782,8 @@ mod tests {
         assert!(result.is_ok());
         let pkg = result.root.package.unwrap();
         assert_eq!(pkg.namespace.len(), 1);
-        assert_eq!(pkg.namespace[0].name, "example");
-        assert_eq!(pkg.name.name, "types");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "example");
+        assert_eq!(pkg.name.name.as_ref(), "types");
     }
 
     #[test]
@@ -2076,9 +2078,7 @@ interface api {
         assert!(result.has_errors());
     }
 
-    // ==================== EDGE CASE TESTS ====================
 
-    // --- Empty Enum/Flags Edge Cases ---
 
     #[test]
     fn parse_empty_enum() {
@@ -2142,7 +2142,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Empty Use List Edge Cases ---
 
     #[test]
     fn parse_empty_use_list() {
@@ -2163,7 +2162,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Function Parameter Edge Cases ---
 
     #[test]
     fn parse_func_consecutive_errors() {
@@ -2205,7 +2203,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Result Type Edge Cases ---
 
     #[test]
     fn parse_result_without_angle_brackets() {
@@ -2256,7 +2253,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Tuple Type Edge Cases ---
 
     #[test]
     fn parse_tuple_trailing_comma() {
@@ -2287,7 +2283,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Borrow/Own Type Edge Cases ---
 
     #[test]
     fn parse_borrow_empty() {
@@ -2319,7 +2314,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Variant Edge Cases ---
 
     #[test]
     fn parse_variant_empty_parens() {
@@ -2371,7 +2365,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Record Edge Cases ---
 
     #[test]
     fn parse_record_missing_field_name() {
@@ -2422,7 +2415,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Interface/World Edge Cases ---
 
     #[test]
     fn parse_interface_missing_name() {
@@ -2463,7 +2455,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- List/Option Type Edge Cases ---
 
     #[test]
     fn parse_list_empty() {
@@ -2495,7 +2486,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Resource Edge Cases ---
 
     #[test]
     fn parse_resource_empty() {
@@ -2521,7 +2511,7 @@ interface api {
         if let Item::Interface(iface) = &result.root.items[0] {
             assert_eq!(iface.items.len(), 2);
             if let InterfaceItem::TypeDef(TypeDef::Resource(res)) = &iface.items[0] {
-                assert_eq!(res.name.name, "network");
+                assert_eq!(res.name.name.as_ref(), "network");
                 assert!(res.items.is_empty(), "opaque resource should have no items");
             } else {
                 panic!("expected resource");
@@ -2576,7 +2566,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Stray Tokens Edge Cases ---
 
     #[test]
     fn parse_stray_rbrace_at_top_level() {
@@ -2619,7 +2608,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Complex Nesting Edge Cases ---
 
     #[test]
     fn parse_deeply_nested_types() {
@@ -2641,7 +2629,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Package Edge Cases ---
 
     #[test]
     fn parse_package_missing_version() {
@@ -2666,7 +2653,6 @@ interface types {
         assert!(result.has_errors());
     }
 
-    // --- Type Alias Edge Cases ---
 
     #[test]
     fn parse_type_alias_missing_equals() {
@@ -2688,7 +2674,6 @@ interface types {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Comment/Doc Edge Cases ---
 
     #[test]
     fn parse_doc_comment_without_item() {
@@ -2713,7 +2698,6 @@ interface types {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // --- Mixed Error Recovery ---
 
     #[test]
     fn parse_multiple_errors_in_one_interface() {
@@ -2772,7 +2756,6 @@ interface types {
         }
     }
 
-    // ==================== PHASE 1: FUTURE/STREAM TYPE TESTS ====================
 
     #[test]
     fn parse_future_with_type() {
@@ -2894,7 +2877,6 @@ interface types {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // ==================== PHASE 2: ASYNC FUNCTION TESTS ====================
 
     #[test]
     fn parse_async_func() {
@@ -3033,7 +3015,6 @@ interface types {
         assert_eq!(result.root.items.len(), 1);
     }
 
-    // ==================== PHASE 3: FEATURE GATE TESTS ====================
 
     #[test]
     fn parse_since_gate_on_interface() {
@@ -3066,7 +3047,7 @@ interface api {
             if let Some(InterfaceItem::Func(f)) = iface.items.first() {
                 assert_eq!(f.gates.gates.len(), 1);
                 if let Gate::Unstable(g) = &f.gates.gates[0] {
-                    assert_eq!(g.feature.name, "experimental-api");
+                    assert_eq!(g.feature.name.as_ref(), "experimental-api");
                 } else {
                     panic!("Expected unstable gate");
                 }
@@ -3196,12 +3177,11 @@ interface clocks {
         if let Some(Item::Interface(iface)) = result.root.items.first() {
             assert_eq!(iface.gates.gates.len(), 1);
             if let Gate::Unstable(g) = &iface.gates.gates[0] {
-                assert_eq!(g.feature.name, "wasi-clocks");
+                assert_eq!(g.feature.name.as_ref(), "wasi-clocks");
             }
         }
     }
 
-    // ==================== Phase 4: Include with clause tests ====================
 
     #[test]
     fn parse_include_basic() {
@@ -3232,8 +3212,8 @@ interface clocks {
         if let Some(Item::World(world)) = result.root.items.first() {
             if let WorldItem::Include(inc) = &world.items[0] {
                 assert_eq!(inc.with.len(), 1);
-                assert_eq!(inc.with[0].name.name, "foo");
-                assert_eq!(inc.with[0].alias.name, "bar");
+                assert_eq!(inc.with[0].name.name.as_ref(), "foo");
+                assert_eq!(inc.with[0].alias.name.as_ref(), "bar");
             } else {
                 panic!("expected include");
             }
@@ -3251,10 +3231,10 @@ interface clocks {
         if let Some(Item::World(world)) = result.root.items.first() {
             if let WorldItem::Include(inc) = &world.items[0] {
                 assert_eq!(inc.with.len(), 2);
-                assert_eq!(inc.with[0].name.name, "foo");
-                assert_eq!(inc.with[0].alias.name, "bar");
-                assert_eq!(inc.with[1].name.name, "baz");
-                assert_eq!(inc.with[1].alias.name, "qux");
+                assert_eq!(inc.with[0].name.name.as_ref(), "foo");
+                assert_eq!(inc.with[0].alias.name.as_ref(), "bar");
+                assert_eq!(inc.with[1].name.name.as_ref(), "baz");
+                assert_eq!(inc.with[1].alias.name.as_ref(), "qux");
             } else {
                 panic!("expected include");
             }
@@ -3278,7 +3258,6 @@ interface clocks {
         }
     }
 
-    // ==================== Phase 5: Fallible constructor tests ====================
 
     #[test]
     fn parse_constructor_basic() {
@@ -3387,7 +3366,6 @@ interface clocks {
         }
     }
 
-    // ==================== Nested packages tests ====================
 
     #[test]
     fn parse_nested_package_single() {
@@ -3402,8 +3380,8 @@ interface clocks {
 
         let pkg = &result.root.nested_packages[0];
         assert_eq!(pkg.package.namespace.len(), 1);
-        assert_eq!(pkg.package.namespace[0].name, "local");
-        assert_eq!(pkg.package.name.name, "foo");
+        assert_eq!(pkg.package.namespace[0].name.as_ref(), "local");
+        assert_eq!(pkg.package.name.name.as_ref(), "foo");
         assert_eq!(pkg.items.len(), 1);
     }
 
@@ -3422,8 +3400,8 @@ package local:b {
         assert!(result.root.package.is_none());
         assert_eq!(result.root.nested_packages.len(), 2);
 
-        assert_eq!(result.root.nested_packages[0].package.name.name, "a");
-        assert_eq!(result.root.nested_packages[1].package.name.name, "b");
+        assert_eq!(result.root.nested_packages[0].package.name.name.as_ref(), "a");
+        assert_eq!(result.root.nested_packages[1].package.name.name.as_ref(), "b");
     }
 
     #[test]
@@ -3440,8 +3418,8 @@ package local:b {
 
         let pkg = &result.root.nested_packages[0];
         assert_eq!(pkg.package.namespace.len(), 1);
-        assert_eq!(pkg.package.namespace[0].name, "wasi");
-        assert_eq!(pkg.package.name.name, "http");
+        assert_eq!(pkg.package.namespace[0].name.as_ref(), "wasi");
+        assert_eq!(pkg.package.name.name.as_ref(), "http");
         assert!(pkg.package.version.is_some());
         let version = pkg.package.version.as_ref().unwrap();
         assert_eq!(version.major, 1);
@@ -3463,7 +3441,7 @@ package local:b {
         let pkg = &result.root.nested_packages[0];
         assert_eq!(pkg.items.len(), 1);
         if let Item::World(world) = &pkg.items[0] {
-            assert_eq!(world.name.name, "my-world");
+            assert_eq!(world.name.name.as_ref(), "my-world");
             assert_eq!(world.items.len(), 2);
         } else {
             panic!("expected world");
@@ -3499,10 +3477,10 @@ package local:helper {
 
         // Should have both standalone and nested
         assert!(result.root.package.is_some());
-        assert_eq!(result.root.package.as_ref().unwrap().name.name, "app");
+        assert_eq!(result.root.package.as_ref().unwrap().name.name.as_ref(), "app");
 
         assert_eq!(result.root.nested_packages.len(), 1);
-        assert_eq!(result.root.nested_packages[0].package.name.name, "helper");
+        assert_eq!(result.root.nested_packages[0].package.name.name.as_ref(), "helper");
     }
 
     #[test]
@@ -3539,7 +3517,6 @@ world main-world {
         assert_eq!(result.root.nested_packages.len(), 1);
     }
 
-    // ==================== Nested namespaces tests (🪺 feature) ====================
 
     #[test]
     fn parse_simple_namespace() {
@@ -3549,8 +3526,8 @@ world main-world {
 
         let pkg = result.root.package.as_ref().unwrap();
         assert_eq!(pkg.namespace.len(), 1);
-        assert_eq!(pkg.namespace[0].name, "wasi");
-        assert_eq!(pkg.name.name, "http");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "wasi");
+        assert_eq!(pkg.name.name.as_ref(), "http");
         assert!(pkg.nested.is_empty());
     }
 
@@ -3562,9 +3539,9 @@ world main-world {
 
         let pkg = result.root.package.as_ref().unwrap();
         assert_eq!(pkg.namespace.len(), 2);
-        assert_eq!(pkg.namespace[0].name, "foo");
-        assert_eq!(pkg.namespace[1].name, "bar");
-        assert_eq!(pkg.name.name, "baz");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "foo");
+        assert_eq!(pkg.namespace[1].name.as_ref(), "bar");
+        assert_eq!(pkg.name.name.as_ref(), "baz");
         assert!(pkg.nested.is_empty());
     }
 
@@ -3576,10 +3553,10 @@ world main-world {
 
         let pkg = result.root.package.as_ref().unwrap();
         assert_eq!(pkg.namespace.len(), 3);
-        assert_eq!(pkg.namespace[0].name, "a");
-        assert_eq!(pkg.namespace[1].name, "b");
-        assert_eq!(pkg.namespace[2].name, "c");
-        assert_eq!(pkg.name.name, "d");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "a");
+        assert_eq!(pkg.namespace[1].name.as_ref(), "b");
+        assert_eq!(pkg.namespace[2].name.as_ref(), "c");
+        assert_eq!(pkg.name.name.as_ref(), "d");
     }
 
     #[test]
@@ -3590,10 +3567,10 @@ world main-world {
 
         let pkg = result.root.package.as_ref().unwrap();
         assert_eq!(pkg.namespace.len(), 1);
-        assert_eq!(pkg.namespace[0].name, "wasi");
-        assert_eq!(pkg.name.name, "http");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "wasi");
+        assert_eq!(pkg.name.name.as_ref(), "http");
         assert_eq!(pkg.nested.len(), 1);
-        assert_eq!(pkg.nested[0].name, "types");
+        assert_eq!(pkg.nested[0].name.as_ref(), "types");
     }
 
     #[test]
@@ -3604,11 +3581,11 @@ world main-world {
 
         let pkg = result.root.package.as_ref().unwrap();
         assert_eq!(pkg.namespace.len(), 1);
-        assert_eq!(pkg.namespace[0].name, "wasi");
-        assert_eq!(pkg.name.name, "http");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "wasi");
+        assert_eq!(pkg.name.name.as_ref(), "http");
         assert_eq!(pkg.nested.len(), 2);
-        assert_eq!(pkg.nested[0].name, "types");
-        assert_eq!(pkg.nested[1].name, "streams");
+        assert_eq!(pkg.nested[0].name.as_ref(), "types");
+        assert_eq!(pkg.nested[1].name.as_ref(), "streams");
     }
 
     #[test]
@@ -3620,11 +3597,11 @@ world main-world {
 
         let pkg = result.root.package.as_ref().unwrap();
         assert_eq!(pkg.namespace.len(), 2);
-        assert_eq!(pkg.namespace[0].name, "foo");
-        assert_eq!(pkg.namespace[1].name, "bar");
-        assert_eq!(pkg.name.name, "baz");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "foo");
+        assert_eq!(pkg.namespace[1].name.as_ref(), "bar");
+        assert_eq!(pkg.name.name.as_ref(), "baz");
         assert_eq!(pkg.nested.len(), 1);
-        assert_eq!(pkg.nested[0].name, "quux");
+        assert_eq!(pkg.nested[0].name.as_ref(), "quux");
     }
 
     #[test]
@@ -3635,7 +3612,7 @@ world main-world {
 
         let pkg = result.root.package.as_ref().unwrap();
         assert_eq!(pkg.namespace.len(), 2);
-        assert_eq!(pkg.name.name, "baz");
+        assert_eq!(pkg.name.name.as_ref(), "baz");
         assert!(pkg.version.is_some());
         let v = pkg.version.as_ref().unwrap();
         assert_eq!(v.major, 1);
@@ -3652,12 +3629,12 @@ world main-world {
 
         let pkg = result.root.package.as_ref().unwrap();
         assert_eq!(pkg.namespace.len(), 2);
-        assert_eq!(pkg.namespace[0].name, "foo");
-        assert_eq!(pkg.namespace[1].name, "bar");
-        assert_eq!(pkg.name.name, "baz");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "foo");
+        assert_eq!(pkg.namespace[1].name.as_ref(), "bar");
+        assert_eq!(pkg.name.name.as_ref(), "baz");
         assert_eq!(pkg.nested.len(), 2);
-        assert_eq!(pkg.nested[0].name, "quux");
-        assert_eq!(pkg.nested[1].name, "deep");
+        assert_eq!(pkg.nested[0].name.as_ref(), "quux");
+        assert_eq!(pkg.nested[1].name.as_ref(), "deep");
         assert!(pkg.version.is_some());
     }
 
@@ -3672,12 +3649,11 @@ world main-world {
         assert_eq!(result.root.nested_packages.len(), 1);
         let pkg = &result.root.nested_packages[0].package;
         assert_eq!(pkg.namespace.len(), 2);
-        assert_eq!(pkg.namespace[0].name, "foo");
-        assert_eq!(pkg.namespace[1].name, "bar");
-        assert_eq!(pkg.name.name, "baz");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "foo");
+        assert_eq!(pkg.namespace[1].name.as_ref(), "bar");
+        assert_eq!(pkg.name.name.as_ref(), "baz");
     }
 
-    // ==================== Real-world WASI WIT tests ====================
 
     #[test]
     fn parse_wasi_random_insecure() {
@@ -3699,13 +3675,13 @@ interface insecure {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         let pkg = result.root.package.as_ref().unwrap();
-        assert_eq!(pkg.namespace[0].name, "wasi");
-        assert_eq!(pkg.name.name, "random");
+        assert_eq!(pkg.namespace[0].name.as_ref(), "wasi");
+        assert_eq!(pkg.name.name.as_ref(), "random");
         assert!(pkg.version.is_some());
 
         assert_eq!(result.root.items.len(), 1);
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "insecure");
+            assert_eq!(iface.name.name.as_ref(), "insecure");
             assert_eq!(iface.items.len(), 2);
             assert!(!iface.gates.is_empty());
         } else {
@@ -3740,7 +3716,7 @@ interface wall-clock {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "wall-clock");
+            assert_eq!(iface.name.name.as_ref(), "wall-clock");
             // Should have record + 2 functions
             assert_eq!(iface.items.len(), 3);
         } else {
@@ -3765,7 +3741,7 @@ world command {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::World(world) = &result.root.items[0] {
-            assert_eq!(world.name.name, "command");
+            assert_eq!(world.name.name.as_ref(), "command");
             assert!(!world.gates.is_empty());
             // include + export
             assert_eq!(world.items.len(), 2);
@@ -3972,7 +3948,7 @@ interface streams {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "streams");
+            assert_eq!(iface.name.name.as_ref(), "streams");
             // 2 use + variant + 2 resources
             assert_eq!(iface.items.len(), 5);
         } else {
@@ -4043,7 +4019,7 @@ interface tcp {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "tcp");
+            assert_eq!(iface.name.name.as_ref(), "tcp");
             // 4 use + enum + resource
             assert_eq!(iface.items.len(), 6);
         } else {
@@ -4118,7 +4094,7 @@ interface types {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "types");
+            assert_eq!(iface.name.name.as_ref(), "types");
         } else {
             panic!("expected interface");
         }
@@ -4170,7 +4146,7 @@ interface types {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "types");
+            assert_eq!(iface.name.name.as_ref(), "types");
         } else {
             panic!("expected interface");
         }
@@ -4272,7 +4248,7 @@ interface types {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "types");
+            assert_eq!(iface.name.name.as_ref(), "types");
         } else {
             panic!("expected interface");
         }
@@ -4307,7 +4283,7 @@ interface poll {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "poll");
+            assert_eq!(iface.name.name.as_ref(), "poll");
             // resource + function
             assert_eq!(iface.items.len(), 2);
         } else {
@@ -4338,7 +4314,7 @@ interface types {
         assert!(result.is_ok(), "Parse failed: {:?}", result.errors);
 
         if let Item::Interface(iface) = &result.root.items[0] {
-            assert_eq!(iface.name.name, "types");
+            assert_eq!(iface.name.name.as_ref(), "types");
         } else {
             panic!("expected interface");
         }

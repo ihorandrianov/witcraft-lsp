@@ -1,5 +1,5 @@
 use crate::document::{DocumentStore, SharedDocumentStore};
-use crate::workspace::{CrossFileResolver, ResolveResult, SharedWorkspaceManager, WorkspaceManager};
+use crate::workspace::{CrossFileResolver, ResolveResult, SharedWorkspaceManager, UndefinedType, WorkspaceManager};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
@@ -55,10 +55,7 @@ impl WitLanguageServer {
                 info!("References: {}", index.references().len());
                 info!("Definitions: {}", index.definitions().len());
 
-                // Extract package ID if present
                 let package_id = parse.root.package.as_ref().map(PackageId::from_package_decl);
-
-                // Update workspace with this file's definitions
                 self.workspace.update_file_definitions(uri, &index, package_id.clone());
 
                 let errors: Vec<_> = parse
@@ -70,25 +67,15 @@ impl WitLanguageServer {
                     })
                     .collect();
 
-                // Use cross-file resolver for undefined type detection
                 let resolver = CrossFileResolver::new(&self.workspace);
-                let undefined: Vec<_> = resolver
-                    .find_undefined_types(uri, &index)
-                    .into_iter()
-                    .map(|u| {
-                        info!("Undefined type: '{}'", u.name);
-                        (u.range, u.name)
-                    })
-                    .collect();
+                let undefined: Vec<UndefinedType> = resolver.find_undefined_types(uri, &index);
 
-                // Find duplicate definitions
                 let duplicates: Vec<_> = index
                     .find_duplicate_definitions()
                     .into_iter()
-                    .map(|d| (d.duplicate_range, d.name))
+                    .map(|d| (d.duplicate_range, d.first_range, d.name))
                     .collect();
 
-                // Find unused imports
                 let unused: Vec<_> = index
                     .find_unused_imports()
                     .into_iter()
@@ -110,20 +97,32 @@ impl WitLanguageServer {
                 });
             }
 
-            for (range, name) in undefined_types {
+            for undef in undefined_types {
                 diagnostics.push(Diagnostic {
-                    range: doc.range_to_lsp(range),
+                    range: doc.range_to_lsp(undef.range),
                     severity: Some(DiagnosticSeverity::ERROR),
-                    message: format!("undefined type `{}`", name),
+                    message: format_undefined_type_message(&undef),
                     ..Default::default()
                 });
             }
 
-            for (range, name) in duplicates {
+            for (range, first_range, name) in duplicates {
+                let first_pos = doc.line_index.position(first_range.start());
                 diagnostics.push(Diagnostic {
                     range: doc.range_to_lsp(range),
                     severity: Some(DiagnosticSeverity::ERROR),
-                    message: format!("duplicate definition `{}`", name),
+                    message: format!(
+                        "duplicate definition `{}` (first defined at line {})",
+                        name,
+                        first_pos.line + 1
+                    ),
+                    related_information: Some(vec![DiagnosticRelatedInformation {
+                        location: Location::new(
+                            Url::parse(uri).unwrap(),
+                            doc.range_to_lsp(first_range),
+                        ),
+                        message: format!("`{}` first defined here", name),
+                    }]),
                     ..Default::default()
                 });
             }
@@ -232,6 +231,7 @@ impl LanguageServer for WitLanguageServer {
                 definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -246,6 +246,11 @@ impl LanguageServer for WitLanguageServer {
                 ),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![":".to_string(), ".".to_string()]),
+                    ..Default::default()
+                }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: Some(vec![",".to_string()]),
                     ..Default::default()
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
@@ -263,6 +268,12 @@ impl LanguageServer for WitLanguageServer {
                 })),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                inlay_hint_provider: Some(OneOf::Left(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -337,15 +348,15 @@ impl LanguageServer for WitLanguageServer {
             let node = node_at(&parse.root, offset)?;
 
             let name = match node {
-                NodeRef::NamedType(named) => Some(named.name.name.clone()),
+                NodeRef::NamedType(named) => Some(named.name.name.to_string()),
                 NodeRef::Ident(ident) => {
                     if let Some(reference) = index.reference_at(offset) {
-                        Some(reference.name.clone())
+                        Some(reference.name.to_string())
                     } else {
-                        Some(ident.name.clone())
+                        Some(ident.name.to_string())
                     }
                 }
-                NodeRef::UsePath(path) => Some(path.name.name.clone()),
+                NodeRef::UsePath(path) => Some(path.name.name.to_string()),
                 _ => None,
             }?;
 
@@ -387,15 +398,15 @@ impl LanguageServer for WitLanguageServer {
             let node = node_at(&parse.root, offset)?;
 
             let name = match node {
-                NodeRef::NamedType(named) => Some(named.name.name.clone()),
+                NodeRef::NamedType(named) => Some(named.name.name.to_string()),
                 NodeRef::Ident(ident) => {
                     if let Some(reference) = index.reference_at(offset) {
-                        Some(reference.name.clone())
+                        Some(reference.name.to_string())
                     } else {
-                        Some(ident.name.clone())
+                        Some(ident.name.to_string())
                     }
                 }
-                NodeRef::UsePath(path) => Some(path.name.name.clone()),
+                NodeRef::UsePath(path) => Some(path.name.name.to_string()),
                 _ => None,
             }?;
 
@@ -481,9 +492,9 @@ impl LanguageServer for WitLanguageServer {
                 }
                 NodeRef::Ident(ident) => {
                     let name = if let Some(reference) = index.reference_at(offset) {
-                        reference.name.clone()
+                        reference.name.to_string()
                     } else {
-                        ident.name.clone()
+                        ident.name.to_string()
                     };
                     let content = resolve_name(&name)?;
                     let range = index
@@ -559,17 +570,17 @@ impl LanguageServer for WitLanguageServer {
             let node = node_at(&parse.root, offset)?;
 
             let name = match node {
-                NodeRef::NamedType(named) => named.name.name.clone(),
-                NodeRef::Ident(ident) => ident.name.clone(),
-                NodeRef::Interface(iface) => iface.name.name.clone(),
-                NodeRef::World(world) => world.name.name.clone(),
-                NodeRef::Func(func) => func.name.name.clone(),
-                NodeRef::Record(rec) => rec.name.name.clone(),
-                NodeRef::Variant(var) => var.name.name.clone(),
-                NodeRef::Enum(e) => e.name.name.clone(),
-                NodeRef::Flags(f) => f.name.name.clone(),
-                NodeRef::Resource(res) => res.name.name.clone(),
-                NodeRef::TypeAlias(alias) => alias.name.name.clone(),
+                NodeRef::NamedType(named) => named.name.name.to_string(),
+                NodeRef::Ident(ident) => ident.name.to_string(),
+                NodeRef::Interface(iface) => iface.name.name.to_string(),
+                NodeRef::World(world) => world.name.name.to_string(),
+                NodeRef::Func(func) => func.name.name.to_string(),
+                NodeRef::Record(rec) => rec.name.name.to_string(),
+                NodeRef::Variant(var) => var.name.name.to_string(),
+                NodeRef::Enum(e) => e.name.name.to_string(),
+                NodeRef::Flags(f) => f.name.name.to_string(),
+                NodeRef::Resource(res) => res.name.name.to_string(),
+                NodeRef::TypeAlias(alias) => alias.name.name.to_string(),
                 _ => return None,
             };
 
@@ -609,7 +620,7 @@ impl LanguageServer for WitLanguageServer {
 
                 // Find all references
                 for reference in index.references() {
-                    if reference.name == name {
+                    if &*reference.name == name {
                         file_locs.push(Location::new(
                             Url::parse(file_uri).unwrap(),
                             doc.range_to_lsp(reference.range),
@@ -755,9 +766,9 @@ impl LanguageServer for WitLanguageServer {
                 };
 
                 items.push(CompletionItem {
-                    label: def.name.clone(),
+                    label: def.name.to_string(),
                     kind: Some(kind),
-                    detail: def.parent.clone(),
+                    detail: def.parent.as_ref().map(|p| p.to_string()),
                     ..Default::default()
                 });
             }
@@ -765,7 +776,7 @@ impl LanguageServer for WitLanguageServer {
             // Add imported types (via `use` statements)
             for import in index.imports() {
                 items.push(CompletionItem {
-                    label: import.local_name.clone(),
+                    label: import.local_name.to_string(),
                     kind: Some(CompletionItemKind::STRUCT),
                     detail: Some(format!("from {}", import.from_interface)),
                     ..Default::default()
@@ -824,7 +835,7 @@ impl LanguageServer for WitLanguageServer {
                 let ns_str = pkg
                     .namespace
                     .iter()
-                    .map(|i| i.name.as_str())
+                    .map(|i| &*i.name)
                     .collect::<Vec<_>>()
                     .join(":");
                 let name = format!("{}:{}", ns_str, pkg.name.name);
@@ -856,7 +867,7 @@ impl LanguageServer for WitLanguageServer {
                         let children = build_interface_symbols(iface, &range_to_lsp);
                         #[allow(deprecated)]
                         symbols.push(DocumentSymbol {
-                            name: iface.name.name.clone(),
+                            name: iface.name.name.to_string(),
                             detail: Some("interface".to_string()),
                             kind: SymbolKind::INTERFACE,
                             tags: None,
@@ -874,7 +885,7 @@ impl LanguageServer for WitLanguageServer {
                         let children = build_world_symbols(world, &range_to_lsp);
                         #[allow(deprecated)]
                         symbols.push(DocumentSymbol {
-                            name: world.name.name.clone(),
+                            name: world.name.name.to_string(),
                             detail: Some("world".to_string()),
                             kind: SymbolKind::MODULE,
                             tags: None,
@@ -988,25 +999,25 @@ impl LanguageServer for WitLanguageServer {
                 NodeRef::Ident(ident) => {
                     // Check if this is a definition or a reference
                     if index.find_definition(&ident.name).is_some() {
-                        (ident.name.clone(), ident.range)
+                        (ident.name.to_string(), ident.range)
                     } else if index.reference_at(offset).is_some() {
                         // It's a reference - find the definition
                         let reference = index.reference_at(offset)?;
-                        (reference.name.clone(), reference.range)
+                        (reference.name.to_string(), reference.range)
                     } else {
                         return None;
                     }
                 }
-                NodeRef::Interface(iface) => (iface.name.name.clone(), iface.name.range),
-                NodeRef::World(world) => (world.name.name.clone(), world.name.range),
-                NodeRef::Record(rec) => (rec.name.name.clone(), rec.name.range),
-                NodeRef::Variant(var) => (var.name.name.clone(), var.name.range),
-                NodeRef::Enum(e) => (e.name.name.clone(), e.name.range),
-                NodeRef::Flags(f) => (f.name.name.clone(), f.name.range),
-                NodeRef::Resource(res) => (res.name.name.clone(), res.name.range),
-                NodeRef::TypeAlias(alias) => (alias.name.name.clone(), alias.name.range),
-                NodeRef::Func(func) => (func.name.name.clone(), func.name.range),
-                NodeRef::NamedType(named) => (named.name.name.clone(), named.name.range),
+                NodeRef::Interface(iface) => (iface.name.name.to_string(), iface.name.range),
+                NodeRef::World(world) => (world.name.name.to_string(), world.name.range),
+                NodeRef::Record(rec) => (rec.name.name.to_string(), rec.name.range),
+                NodeRef::Variant(var) => (var.name.name.to_string(), var.name.range),
+                NodeRef::Enum(e) => (e.name.name.to_string(), e.name.range),
+                NodeRef::Flags(f) => (f.name.name.to_string(), f.name.range),
+                NodeRef::Resource(res) => (res.name.name.to_string(), res.name.range),
+                NodeRef::TypeAlias(alias) => (alias.name.name.to_string(), alias.name.range),
+                NodeRef::Func(func) => (func.name.name.to_string(), func.name.range),
+                NodeRef::NamedType(named) => (named.name.name.to_string(), named.name.range),
                 _ => return None,
             };
 
@@ -1039,17 +1050,17 @@ impl LanguageServer for WitLanguageServer {
 
             // Get the symbol name
             match node {
-                NodeRef::Ident(ident) => Some(ident.name.clone()),
-                NodeRef::Interface(iface) => Some(iface.name.name.clone()),
-                NodeRef::World(world) => Some(world.name.name.clone()),
-                NodeRef::Record(rec) => Some(rec.name.name.clone()),
-                NodeRef::Variant(var) => Some(var.name.name.clone()),
-                NodeRef::Enum(e) => Some(e.name.name.clone()),
-                NodeRef::Flags(f) => Some(f.name.name.clone()),
-                NodeRef::Resource(res) => Some(res.name.name.clone()),
-                NodeRef::TypeAlias(alias) => Some(alias.name.name.clone()),
-                NodeRef::Func(func) => Some(func.name.name.clone()),
-                NodeRef::NamedType(named) => Some(named.name.name.clone()),
+                NodeRef::Ident(ident) => Some(ident.name.to_string()),
+                NodeRef::Interface(iface) => Some(iface.name.name.to_string()),
+                NodeRef::World(world) => Some(world.name.name.to_string()),
+                NodeRef::Record(rec) => Some(rec.name.name.to_string()),
+                NodeRef::Variant(var) => Some(var.name.name.to_string()),
+                NodeRef::Enum(e) => Some(e.name.name.to_string()),
+                NodeRef::Flags(f) => Some(f.name.name.to_string()),
+                NodeRef::Resource(res) => Some(res.name.name.to_string()),
+                NodeRef::TypeAlias(alias) => Some(alias.name.name.to_string()),
+                NodeRef::Func(func) => Some(func.name.name.to_string()),
+                NodeRef::NamedType(named) => Some(named.name.name.to_string()),
                 _ => None,
             }
         }).flatten();
@@ -1085,7 +1096,7 @@ impl LanguageServer for WitLanguageServer {
 
                 // Find all references in this file
                 for reference in index.references() {
-                    if reference.name == old_name {
+                    if &*reference.name == old_name {
                         edits.push(TextEdit {
                             range: doc.range_to_lsp(reference.range),
                             new_text: new_name.clone(),
@@ -1095,7 +1106,7 @@ impl LanguageServer for WitLanguageServer {
 
                 // Find imports that reference this name
                 for import in index.imports() {
-                    if import.original_name == old_name {
+                    if &*import.original_name == old_name {
                         // Rename the original name in the import statement
                         // For `use iface.{old-name as alias}`, we rename `old-name`
                         edits.push(TextEdit {
@@ -1105,11 +1116,11 @@ impl LanguageServer for WitLanguageServer {
 
                         // If there's no alias, also update usages (they use the original name)
                         // If there IS an alias, usages use the alias so we don't touch them
-                        if import.local_name == old_name {
+                        if &*import.local_name == old_name {
                             // No alias - local_name equals original_name
                             // References using this name will be caught by the references loop above
                         }
-                    } else if import.local_name == old_name && import.original_name != old_name {
+                    } else if &*import.local_name == old_name && &*import.original_name != old_name {
                         // The import has an alias that matches old_name
                         // e.g., `use iface.{something as old-name}`
                         // Rename the alias
@@ -1197,12 +1208,12 @@ impl LanguageServer for WitLanguageServer {
 
                 #[allow(deprecated)]
                 symbols.push(SymbolInformation {
-                    name: def.name.clone(),
+                    name: def.name.to_string(),
                     kind,
                     tags: None,
                     deprecated: None,
                     location,
-                    container_name: def.parent.clone(),
+                    container_name: def.parent.as_ref().map(|p| p.to_string()),
                 });
             }
         }
@@ -1252,6 +1263,214 @@ impl LanguageServer for WitLanguageServer {
         });
 
         Ok(result.flatten())
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let position = params.text_document_position_params.position;
+
+        let result = self.documents.with_document_mut(&uri, |doc| {
+            let offset = doc.position_to_offset(witcraft_syntax::Position::new(
+                position.line,
+                position.character,
+            ))?;
+
+            let content = &doc.content;
+
+            // Find signature context by scanning backwards
+            find_signature_context(content, offset as usize)
+        });
+
+        Ok(result.flatten())
+    }
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = params.text_document.uri.to_string();
+
+        let ranges = self.documents.with_document_mut(&uri, |doc| {
+            let parse = doc.parse().clone();
+            let mut folding_ranges = Vec::new();
+            let line_index = &doc.line_index;
+
+            // Helper to add a folding range
+            let mut add_range = |range: witcraft_syntax::TextRange| {
+                let start = line_index.position(range.start());
+                let end = line_index.position(range.end());
+                // Only fold if it spans multiple lines
+                if end.line > start.line {
+                    folding_ranges.push(FoldingRange {
+                        start_line: start.line,
+                        start_character: Some(start.column),
+                        end_line: end.line,
+                        end_character: Some(end.column),
+                        kind: Some(FoldingRangeKind::Region),
+                        collapsed_text: None,
+                    });
+                }
+            };
+
+            // Collect folding ranges from the AST
+            for item in &parse.root.items {
+                match item {
+                    witcraft_syntax::Item::Interface(iface) => {
+                        add_range(iface.range);
+                        // Also fold nested types
+                        for item in &iface.items {
+                            if let witcraft_syntax::InterfaceItem::TypeDef(td) = item {
+                                add_range(td.range());
+                            }
+                        }
+                    }
+                    witcraft_syntax::Item::World(world) => {
+                        add_range(world.range);
+                    }
+                    witcraft_syntax::Item::TypeDef(td) => {
+                        add_range(td.range());
+                    }
+                }
+            }
+
+            // Nested packages
+            for nested in &parse.root.nested_packages {
+                add_range(nested.range);
+            }
+
+            folding_ranges
+        });
+
+        match ranges {
+            Some(r) if !r.is_empty() => Ok(Some(r)),
+            _ => Ok(None),
+        }
+    }
+
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri.to_string();
+
+        let hints = self.documents.with_document_mut(&uri, |doc| {
+            let parse = doc.parse().clone();
+            collect_inlay_hints(&parse.root, &self.workspace, &uri, &doc.line_index)
+        });
+
+        match hints {
+            Some(h) if !h.is_empty() => Ok(Some(h)),
+            _ => Ok(None),
+        }
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let position = params.text_document_position_params.position;
+
+        let highlights = self.documents.with_document_mut(&uri, |doc| {
+            let offset = doc.position_to_offset(witcraft_syntax::Position::new(
+                position.line,
+                position.character,
+            ))?;
+
+            let parse = doc.parse();
+            let index = SymbolIndex::build(&parse.root);
+            let node = node_at(&parse.root, offset)?;
+
+            let name = match node {
+                NodeRef::NamedType(named) => named.name.name.to_string(),
+                NodeRef::Ident(ident) => ident.name.to_string(),
+                NodeRef::Interface(iface) => iface.name.name.to_string(),
+                NodeRef::World(world) => world.name.name.to_string(),
+                NodeRef::Func(func) => func.name.name.to_string(),
+                NodeRef::Record(rec) => rec.name.name.to_string(),
+                NodeRef::Variant(var) => var.name.name.to_string(),
+                NodeRef::Enum(e) => e.name.name.to_string(),
+                NodeRef::Flags(f) => f.name.name.to_string(),
+                NodeRef::Resource(res) => res.name.name.to_string(),
+                NodeRef::TypeAlias(alias) => alias.name.name.to_string(),
+                _ => return None,
+            };
+
+            let mut highlights = Vec::new();
+
+            if let Some(def) = index.find_definition(&name) {
+                highlights.push(DocumentHighlight {
+                    range: doc.range_to_lsp(def.name_range),
+                    kind: Some(DocumentHighlightKind::TEXT),
+                });
+            }
+
+            for reference in index.references() {
+                if &*reference.name == name {
+                    highlights.push(DocumentHighlight {
+                        range: doc.range_to_lsp(reference.range),
+                        kind: Some(DocumentHighlightKind::READ),
+                    });
+                }
+            }
+
+            if highlights.is_empty() {
+                None
+            } else {
+                Some(highlights)
+            }
+        });
+
+        Ok(highlights.flatten())
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = params.text_document.uri.to_string();
+
+        let ranges = self.documents.with_document_mut(&uri, |doc| {
+            let parse = doc.parse().clone();
+            let mut results = Vec::new();
+
+            for position in &params.positions {
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(
+                    position.line,
+                    position.character,
+                ));
+
+                if let Some(offset) = offset {
+                    let selection = build_selection_range(&parse.root, offset, &doc.line_index);
+                    results.push(selection);
+                }
+            }
+
+            results
+        });
+
+        match ranges {
+            Some(r) if !r.is_empty() => Ok(Some(r)),
+            _ => Ok(None),
+        }
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let uri = params.text_document.uri.as_str();
+
+        let lenses = self.documents.with_document_mut(uri, |doc| {
+            let parse = doc.parse().clone();
+            let index = SymbolIndex::build(&parse.root);
+            collect_code_lenses(&index, &doc.line_index)
+        });
+
+        match lenses {
+            Some(l) if !l.is_empty() => Ok(Some(l)),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -1412,7 +1631,7 @@ where
             witcraft_syntax::ast::InterfaceItem::Func(func) => {
                 #[allow(deprecated)]
                 children.push(DocumentSymbol {
-                    name: func.name.name.clone(),
+                    name: func.name.name.to_string(),
                     detail: Some("func".to_string()),
                     kind: SymbolKind::FUNCTION,
                     tags: None,
@@ -1423,7 +1642,7 @@ where
                 });
             }
             witcraft_syntax::ast::InterfaceItem::Use(use_stmt) => {
-                let names: Vec<_> = use_stmt.names.iter().map(|n| n.name.name.as_str()).collect();
+                let names: Vec<_> = use_stmt.names.iter().map(|n| &*n.name.name).collect();
                 #[allow(deprecated)]
                 children.push(DocumentSymbol {
                     name: format!("use {}", use_stmt.path.name.name),
@@ -1495,7 +1714,7 @@ where
                 }
             }
             witcraft_syntax::ast::WorldItem::Use(use_stmt) => {
-                let names: Vec<_> = use_stmt.names.iter().map(|n| n.name.name.as_str()).collect();
+                let names: Vec<_> = use_stmt.names.iter().map(|n| &*n.name.name).collect();
                 #[allow(deprecated)]
                 children.push(DocumentSymbol {
                     name: format!("use {}", use_stmt.path.name.name),
@@ -1520,42 +1739,42 @@ where
 {
     let (name, kind, detail, range, name_range) = match typedef {
         witcraft_syntax::ast::TypeDef::Alias(alias) => (
-            alias.name.name.clone(),
+            alias.name.name.to_string(),
             SymbolKind::TYPE_PARAMETER,
             "type",
             alias.range,
             alias.name.range,
         ),
         witcraft_syntax::ast::TypeDef::Record(rec) => (
-            rec.name.name.clone(),
+            rec.name.name.to_string(),
             SymbolKind::STRUCT,
             "record",
             rec.range,
             rec.name.range,
         ),
         witcraft_syntax::ast::TypeDef::Variant(var) => (
-            var.name.name.clone(),
+            var.name.name.to_string(),
             SymbolKind::ENUM,
             "variant",
             var.range,
             var.name.range,
         ),
         witcraft_syntax::ast::TypeDef::Enum(e) => (
-            e.name.name.clone(),
+            e.name.name.to_string(),
             SymbolKind::ENUM,
             "enum",
             e.range,
             e.name.range,
         ),
         witcraft_syntax::ast::TypeDef::Flags(f) => (
-            f.name.name.clone(),
+            f.name.name.to_string(),
             SymbolKind::ENUM,
             "flags",
             f.range,
             f.name.range,
         ),
         witcraft_syntax::ast::TypeDef::Resource(res) => (
-            res.name.name.clone(),
+            res.name.name.to_string(),
             SymbolKind::CLASS,
             "resource",
             res.range,
@@ -1644,4 +1863,1752 @@ fn format_global_definition(def: &GlobalDefinition) -> String {
     }
 
     result
+}
+
+/// Find signature help context by scanning backwards from cursor position.
+/// Returns SignatureHelp if cursor is inside a generic type or function parameter list.
+fn find_signature_context(content: &str, offset: usize) -> Option<SignatureHelp> {
+    let before = &content[..offset.min(content.len())];
+
+    // Track nesting depth to handle nested generics/parens
+    let mut angle_depth = 0i32;
+    let mut paren_depth = 0i32;
+    let mut comma_count = 0u32;
+    let mut context_start = None;
+
+    // Scan backwards to find the opening `<` or `(`
+    for (i, ch) in before.char_indices().rev() {
+        match ch {
+            '>' => angle_depth += 1,
+            '<' => {
+                if angle_depth > 0 {
+                    angle_depth -= 1;
+                } else {
+                    context_start = Some((i, '<'));
+                    break;
+                }
+            }
+            ')' => paren_depth += 1,
+            '(' => {
+                if paren_depth > 0 {
+                    paren_depth -= 1;
+                } else {
+                    context_start = Some((i, '('));
+                    break;
+                }
+            }
+            ',' if angle_depth == 0 && paren_depth == 0 => {
+                comma_count += 1;
+            }
+            // Stop at statement boundaries
+            ';' | '{' | '}' => break,
+            _ => {}
+        }
+    }
+
+    let (open_pos, open_char) = context_start?;
+
+    // Extract the keyword before the opening bracket
+    let keyword_end = open_pos;
+    let keyword_start = before[..keyword_end]
+        .rfind(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let keyword = before[keyword_start..keyword_end].trim();
+
+    // Build signature help based on context
+    match (keyword, open_char) {
+        ("result", '<') => Some(make_signature_help(
+            "result<ok-type, err-type>",
+            "Result type with success and error variants.\n\n- Use `_` for ok-type if only error matters\n- Omit err-type for infallible results: `result<T>`",
+            &[
+                ("ok-type", "The success type (use `_` to omit)"),
+                ("err-type", "The error type"),
+            ],
+            comma_count,
+        )),
+        ("option", '<') => Some(make_signature_help(
+            "option<inner-type>",
+            "Optional type that may contain a value or be none.",
+            &[("inner-type", "The wrapped type")],
+            comma_count,
+        )),
+        ("list", '<') => Some(make_signature_help(
+            "list<element-type>",
+            "A variable-length sequence of elements.",
+            &[("element-type", "The type of list elements")],
+            comma_count,
+        )),
+        ("tuple", '<') => Some(make_signature_help(
+            "tuple<T, U, ...>",
+            "A fixed-size sequence of heterogeneous types.",
+            &[
+                ("T", "First element type"),
+                ("U", "Second element type"),
+                ("...", "Additional element types"),
+            ],
+            comma_count,
+        )),
+        ("borrow", '<') => Some(make_signature_help(
+            "borrow<resource-name>",
+            "A borrowed handle to a resource. The resource is not consumed.",
+            &[("resource-name", "The resource type to borrow")],
+            comma_count,
+        )),
+        ("own", '<') => Some(make_signature_help(
+            "own<resource-name>",
+            "An owned handle to a resource. Ownership is transferred.",
+            &[("resource-name", "The resource type to own")],
+            comma_count,
+        )),
+        ("future", '<') => Some(make_signature_help(
+            "future<inner-type>",
+            "An async value that will be available later.\n\nCan also be used without type parameter: `future`",
+            &[("inner-type", "The type of the future value")],
+            comma_count,
+        )),
+        ("stream", '<') => Some(make_signature_help(
+            "stream<element-type>",
+            "An async sequence of values.\n\nCan also be used without type parameter: `stream`",
+            &[("element-type", "The type of stream elements")],
+            comma_count,
+        )),
+        ("func", '(') => Some(make_signature_help(
+            "func(name: type, ...) -> return-type",
+            "Function signature with named parameters.\n\n- Parameters: `name: type`\n- Return: `-> type` or `-> (name: type, ...)`",
+            &[
+                ("name: type", "Parameter with name and type"),
+                ("...", "Additional parameters"),
+            ],
+            comma_count,
+        )),
+        ("constructor", '(') => Some(make_signature_help(
+            "constructor(name: type, ...)",
+            "Resource constructor with parameters.\n\nOptionally returns a result: `constructor(...) -> result<_, error>`",
+            &[
+                ("name: type", "Parameter with name and type"),
+                ("...", "Additional parameters"),
+            ],
+            comma_count,
+        )),
+        _ => None,
+    }
+}
+
+/// Build a SignatureHelp response.
+fn make_signature_help(
+    label: &str,
+    doc: &str,
+    params: &[(&str, &str)],
+    active_param: u32,
+) -> SignatureHelp {
+    let parameters: Vec<ParameterInformation> = params
+        .iter()
+        .map(|(name, description)| ParameterInformation {
+            label: ParameterLabel::Simple(name.to_string()),
+            documentation: Some(Documentation::String(description.to_string())),
+        })
+        .collect();
+
+    SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label: label.to_string(),
+            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: doc.to_string(),
+            })),
+            parameters: Some(parameters),
+            active_parameter: Some(active_param.min(params.len().saturating_sub(1) as u32)),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active_param.min(params.len().saturating_sub(1) as u32)),
+    }
+}
+
+fn collect_inlay_hints(
+    root: &witcraft_syntax::SourceFile,
+    workspace: &SharedWorkspaceManager,
+    uri: &str,
+    line_index: &witcraft_syntax::LineIndex,
+) -> Vec<InlayHint> {
+    let mut hints = Vec::new();
+
+    for item in &root.items {
+        collect_hints_from_item(item, workspace, uri, line_index, &mut hints);
+    }
+
+    hints
+}
+
+fn collect_hints_from_item(
+    item: &witcraft_syntax::Item,
+    workspace: &SharedWorkspaceManager,
+    uri: &str,
+    line_index: &witcraft_syntax::LineIndex,
+    hints: &mut Vec<InlayHint>,
+) {
+    match item {
+        witcraft_syntax::Item::Interface(iface) => {
+            for iface_item in &iface.items {
+                match iface_item {
+                    witcraft_syntax::InterfaceItem::TypeDef(typedef) => {
+                        if let witcraft_syntax::TypeDef::Alias(alias) = typedef {
+                            add_type_alias_hint(alias, line_index, hints);
+                        }
+                    }
+                    witcraft_syntax::InterfaceItem::Use(use_stmt) => {
+                        add_use_source_hints(use_stmt, workspace, uri, line_index, hints);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        witcraft_syntax::Item::World(world) => {
+            for world_item in &world.items {
+                match world_item {
+                    witcraft_syntax::WorldItem::TypeDef(typedef) => {
+                        if let witcraft_syntax::TypeDef::Alias(alias) = typedef {
+                            add_type_alias_hint(alias, line_index, hints);
+                        }
+                    }
+                    witcraft_syntax::WorldItem::Use(use_stmt) => {
+                        add_use_source_hints(use_stmt, workspace, uri, line_index, hints);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        witcraft_syntax::Item::TypeDef(typedef) => {
+            if let witcraft_syntax::TypeDef::Alias(alias) = typedef {
+                add_type_alias_hint(alias, line_index, hints);
+            }
+        }
+    }
+}
+
+fn add_type_alias_hint(
+    alias: &witcraft_syntax::TypeAlias,
+    line_index: &witcraft_syntax::LineIndex,
+    hints: &mut Vec<InlayHint>,
+) {
+    let type_text = format_type(&alias.ty);
+    if type_text.len() <= 30 {
+        let pos = line_index.position(alias.name.range.end());
+        hints.push(InlayHint {
+            position: Position::new(pos.line, pos.column),
+            label: InlayHintLabel::String(format!(": {}", type_text)),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(true),
+            padding_right: None,
+            data: None,
+        });
+    }
+}
+
+fn add_use_source_hints(
+    use_stmt: &witcraft_syntax::InterfaceUse,
+    workspace: &SharedWorkspaceManager,
+    uri: &str,
+    line_index: &witcraft_syntax::LineIndex,
+    hints: &mut Vec<InlayHint>,
+) {
+    let source = &use_stmt.path.name.name;
+    if let Some(pkg) = workspace.package_index_for_file(uri) {
+        for name_item in &use_stmt.names {
+            if let Some(def) = pkg.find_definition(name_item.name.name.as_ref()) {
+                if def.uri.as_str() != uri {
+                    let file_name = def.uri.rsplit('/').next().unwrap_or(&def.uri);
+                    let pos = line_index.position(name_item.range.end());
+                    hints.push(InlayHint {
+                        position: Position::new(pos.line, pos.column),
+                        label: InlayHintLabel::String(format!(" ({})", file_name)),
+                        kind: None,
+                        text_edits: None,
+                        tooltip: Some(InlayHintTooltip::String(format!(
+                            "Imported from {} in {}",
+                            source, def.uri
+                        ))),
+                        padding_left: None,
+                        padding_right: None,
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn format_type(ty: &witcraft_syntax::Type) -> String {
+    match ty {
+        witcraft_syntax::Type::Named(named) => named.name.name.to_string(),
+        witcraft_syntax::Type::Primitive(p) => format!("{:?}", p.kind).to_lowercase(),
+        witcraft_syntax::Type::List(list) => format!("list<{}>", format_type(&list.element)),
+        witcraft_syntax::Type::Option(opt) => format!("option<{}>", format_type(&opt.inner)),
+        witcraft_syntax::Type::Result(res) => {
+            match (&res.ok, &res.err) {
+                (Some(ok), Some(err)) => format!("result<{}, {}>", format_type(ok), format_type(err)),
+                (Some(ok), None) => format!("result<{}>", format_type(ok)),
+                (None, Some(err)) => format!("result<_, {}>", format_type(err)),
+                (None, None) => "result".to_string(),
+            }
+        }
+        witcraft_syntax::Type::Tuple(tuple) => {
+            let elems: Vec<_> = tuple.elements.iter().map(format_type).collect();
+            format!("tuple<{}>", elems.join(", "))
+        }
+        witcraft_syntax::Type::Borrow(b) => format!("borrow<{}>", b.resource.name),
+        witcraft_syntax::Type::Own(o) => format!("own<{}>", o.resource.name),
+        witcraft_syntax::Type::Future(f) => {
+            match &f.inner {
+                Some(inner) => format!("future<{}>", format_type(inner)),
+                None => "future".to_string(),
+            }
+        }
+        witcraft_syntax::Type::Stream(s) => {
+            match &s.inner {
+                Some(inner) => format!("stream<{}>", format_type(inner)),
+                None => "stream".to_string(),
+            }
+        }
+    }
+}
+
+fn build_selection_range(
+    root: &witcraft_syntax::SourceFile,
+    offset: u32,
+    line_index: &witcraft_syntax::LineIndex,
+) -> SelectionRange {
+    let mut ranges: Vec<witcraft_syntax::TextRange> = Vec::new();
+
+    ranges.push(root.range);
+
+    for item in &root.items {
+        if item.range().contains(offset) {
+            collect_containing_ranges(item, offset, &mut ranges);
+        }
+    }
+
+    ranges.sort_by_key(|r| std::cmp::Reverse(r.len()));
+
+    let to_lsp_range = |r: witcraft_syntax::TextRange| {
+        let start = line_index.position(r.start());
+        let end = line_index.position(r.end());
+        Range::new(
+            Position::new(start.line, start.column),
+            Position::new(end.line, end.column),
+        )
+    };
+
+    let mut result: Option<SelectionRange> = None;
+
+    for range in ranges {
+        result = Some(SelectionRange {
+            range: to_lsp_range(range),
+            parent: result.map(Box::new),
+        });
+    }
+
+    result.unwrap_or_else(|| SelectionRange {
+        range: to_lsp_range(root.range),
+        parent: None,
+    })
+}
+
+fn collect_containing_ranges(
+    item: &witcraft_syntax::Item,
+    offset: u32,
+    ranges: &mut Vec<witcraft_syntax::TextRange>,
+) {
+    ranges.push(item.range());
+
+    match item {
+        witcraft_syntax::Item::Interface(iface) => {
+            if iface.name.range.contains(offset) {
+                ranges.push(iface.name.range);
+                return;
+            }
+            for iface_item in &iface.items {
+                if iface_item.range().contains(offset) {
+                    collect_interface_item_ranges(iface_item, offset, ranges);
+                }
+            }
+        }
+        witcraft_syntax::Item::World(world) => {
+            if world.name.range.contains(offset) {
+                ranges.push(world.name.range);
+                return;
+            }
+            for world_item in &world.items {
+                if world_item.range().contains(offset) {
+                    collect_world_item_ranges(world_item, offset, ranges);
+                }
+            }
+        }
+        witcraft_syntax::Item::TypeDef(td) => {
+            collect_typedef_ranges(td, offset, ranges);
+        }
+    }
+}
+
+fn collect_interface_item_ranges(
+    item: &witcraft_syntax::InterfaceItem,
+    offset: u32,
+    ranges: &mut Vec<witcraft_syntax::TextRange>,
+) {
+    ranges.push(item.range());
+
+    match item {
+        witcraft_syntax::InterfaceItem::TypeDef(td) => {
+            collect_typedef_ranges(td, offset, ranges);
+        }
+        witcraft_syntax::InterfaceItem::Func(func) => {
+            if func.name.range.contains(offset) {
+                ranges.push(func.name.range);
+            } else {
+                for param in &func.sig.params {
+                    if param.range.contains(offset) {
+                        ranges.push(param.range);
+                        if param.name.range.contains(offset) {
+                            ranges.push(param.name.range);
+                        } else {
+                            collect_type_ranges(&param.ty, offset, ranges);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        witcraft_syntax::InterfaceItem::Use(use_stmt) => {
+            if use_stmt.path.range.contains(offset) {
+                ranges.push(use_stmt.path.range);
+            }
+        }
+    }
+}
+
+fn collect_world_item_ranges(
+    item: &witcraft_syntax::WorldItem,
+    offset: u32,
+    ranges: &mut Vec<witcraft_syntax::TextRange>,
+) {
+    ranges.push(item.range());
+
+    match item {
+        witcraft_syntax::WorldItem::TypeDef(td) => {
+            collect_typedef_ranges(td, offset, ranges);
+        }
+        witcraft_syntax::WorldItem::Import(imp) => {
+            if imp.name.range.contains(offset) {
+                ranges.push(imp.name.range);
+            }
+        }
+        witcraft_syntax::WorldItem::Export(exp) => {
+            if exp.name.range.contains(offset) {
+                ranges.push(exp.name.range);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_typedef_ranges(
+    td: &witcraft_syntax::TypeDef,
+    offset: u32,
+    ranges: &mut Vec<witcraft_syntax::TextRange>,
+) {
+    ranges.push(td.range());
+
+    match td {
+        witcraft_syntax::TypeDef::Alias(alias) => {
+            if alias.name.range.contains(offset) {
+                ranges.push(alias.name.range);
+            } else {
+                collect_type_ranges(&alias.ty, offset, ranges);
+            }
+        }
+        witcraft_syntax::TypeDef::Record(rec) => {
+            if rec.name.range.contains(offset) {
+                ranges.push(rec.name.range);
+            } else {
+                for field in &rec.fields {
+                    if field.range.contains(offset) {
+                        ranges.push(field.range);
+                        if field.name.range.contains(offset) {
+                            ranges.push(field.name.range);
+                        } else {
+                            collect_type_ranges(&field.ty, offset, ranges);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        witcraft_syntax::TypeDef::Variant(var) => {
+            if var.name.range.contains(offset) {
+                ranges.push(var.name.range);
+            } else {
+                for case in &var.cases {
+                    if case.range.contains(offset) {
+                        ranges.push(case.range);
+                        if case.name.range.contains(offset) {
+                            ranges.push(case.name.range);
+                        } else if let Some(ty) = &case.ty {
+                            collect_type_ranges(ty, offset, ranges);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        witcraft_syntax::TypeDef::Enum(e) => {
+            if e.name.range.contains(offset) {
+                ranges.push(e.name.range);
+            } else {
+                for case in &e.cases {
+                    if case.range.contains(offset) {
+                        ranges.push(case.range);
+                        return;
+                    }
+                }
+            }
+        }
+        witcraft_syntax::TypeDef::Flags(f) => {
+            if f.name.range.contains(offset) {
+                ranges.push(f.name.range);
+            } else {
+                for flag in &f.flags {
+                    if flag.range.contains(offset) {
+                        ranges.push(flag.range);
+                        return;
+                    }
+                }
+            }
+        }
+        witcraft_syntax::TypeDef::Resource(res) => {
+            if res.name.range.contains(offset) {
+                ranges.push(res.name.range);
+            }
+        }
+    }
+}
+
+fn collect_type_ranges(
+    ty: &witcraft_syntax::Type,
+    offset: u32,
+    ranges: &mut Vec<witcraft_syntax::TextRange>,
+) {
+    if !ty.range().contains(offset) {
+        return;
+    }
+
+    ranges.push(ty.range());
+
+    match ty {
+        witcraft_syntax::Type::Named(named) => {
+            if named.name.range.contains(offset) {
+                ranges.push(named.name.range);
+            }
+        }
+        witcraft_syntax::Type::List(list) => {
+            collect_type_ranges(&list.element, offset, ranges);
+        }
+        witcraft_syntax::Type::Option(opt) => {
+            collect_type_ranges(&opt.inner, offset, ranges);
+        }
+        witcraft_syntax::Type::Result(res) => {
+            if let Some(ok) = &res.ok {
+                collect_type_ranges(ok, offset, ranges);
+            }
+            if let Some(err) = &res.err {
+                collect_type_ranges(err, offset, ranges);
+            }
+        }
+        witcraft_syntax::Type::Tuple(tuple) => {
+            for elem in &tuple.elements {
+                collect_type_ranges(elem, offset, ranges);
+            }
+        }
+        witcraft_syntax::Type::Borrow(handle) | witcraft_syntax::Type::Own(handle) => {
+            if handle.resource.range.contains(offset) {
+                ranges.push(handle.resource.range);
+            }
+        }
+        witcraft_syntax::Type::Future(future) => {
+            if let Some(inner) = &future.inner {
+                collect_type_ranges(inner, offset, ranges);
+            }
+        }
+        witcraft_syntax::Type::Stream(stream) => {
+            if let Some(inner) = &stream.inner {
+                collect_type_ranges(inner, offset, ranges);
+            }
+        }
+        witcraft_syntax::Type::Primitive(_) => {}
+    }
+}
+
+fn collect_code_lenses(
+    index: &SymbolIndex,
+    line_index: &witcraft_syntax::LineIndex,
+) -> Vec<CodeLens> {
+    let mut lenses = Vec::new();
+    let references = index.references();
+
+    for def in index.definitions() {
+        let ref_count = references.iter().filter(|r| r.name == def.name).count();
+        if ref_count > 0 {
+            let pos = line_index.position(def.name_range.start());
+            let range = Range::new(
+                Position::new(pos.line, pos.column),
+                Position::new(pos.line, pos.column),
+            );
+
+            let title = if ref_count == 1 {
+                "1 reference".to_string()
+            } else {
+                format!("{} references", ref_count)
+            };
+
+            lenses.push(CodeLens {
+                range,
+                command: Some(Command {
+                    title,
+                    command: "editor.action.findReferences".to_string(),
+                    arguments: None,
+                }),
+                data: None,
+            });
+        }
+    }
+
+    lenses
+}
+
+fn format_undefined_type_message(undef: &UndefinedType) -> String {
+    let mut msg = format!("undefined type `{}`", undef.name);
+
+    if !undef.available_in.is_empty() {
+        let first = &undef.available_in[0];
+        msg.push_str(&format!(
+            ". add import: `use {}.{{{}}}`",
+            first.interface, undef.name
+        ));
+    } else if !undef.similar_names.is_empty() {
+        let suggestion = &undef.similar_names[0];
+        msg.push_str(&format!(". did you mean `{}`", suggestion.name));
+        if let Some(iface) = &suggestion.interface {
+            msg.push_str(&format!(" from `{}`", iface));
+        }
+        msg.push('?');
+    }
+
+    msg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::DocumentStore;
+
+    fn make_store_with_doc(content: &str) -> DocumentStore {
+        let store = DocumentStore::new();
+        store.open("file:///test.wit".into(), 1, content.into());
+        store
+    }
+
+    /// Helper to get folding ranges from a document
+    fn get_folding_ranges(content: &str) -> Vec<FoldingRange> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let parse = doc.parse().clone();
+                let line_index = doc.line_index.clone();
+                let mut ranges = Vec::new();
+
+                let mut add_range = |range: witcraft_syntax::TextRange| {
+                    let start = line_index.position(range.start());
+                    let end = line_index.position(range.end());
+                    if end.line > start.line {
+                        ranges.push(FoldingRange {
+                            start_line: start.line,
+                            start_character: Some(start.column),
+                            end_line: end.line,
+                            end_character: Some(end.column),
+                            kind: Some(FoldingRangeKind::Region),
+                            collapsed_text: None,
+                        });
+                    }
+                };
+
+                for item in &parse.root.items {
+                    match item {
+                        witcraft_syntax::Item::Interface(iface) => {
+                            add_range(iface.range);
+                            for item in &iface.items {
+                                if let witcraft_syntax::InterfaceItem::TypeDef(td) = item {
+                                    add_range(td.range());
+                                }
+                            }
+                        }
+                        witcraft_syntax::Item::World(world) => {
+                            add_range(world.range);
+                        }
+                        witcraft_syntax::Item::TypeDef(td) => {
+                            add_range(td.range());
+                        }
+                    }
+                }
+
+                for nested in &parse.root.nested_packages {
+                    add_range(nested.range);
+                }
+
+                ranges
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn folding_range_interface() {
+        let content = r#"interface api {
+    greet: func(name: string);
+    goodbye: func();
+}"#;
+        let ranges = get_folding_ranges(content);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start_line, 0);
+        assert_eq!(ranges[0].end_line, 3);
+    }
+
+    #[test]
+    fn folding_range_world() {
+        let content = r#"world my-world {
+    import log: func(msg: string);
+    export run: func();
+}"#;
+        let ranges = get_folding_ranges(content);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start_line, 0);
+        assert_eq!(ranges[0].end_line, 3);
+    }
+
+    #[test]
+    fn folding_range_nested_types() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+        name: string,
+    }
+
+    enum status {
+        pending,
+        active,
+    }
+}"#;
+        let ranges = get_folding_ranges(content);
+        // Interface + record + enum = 3 folding ranges
+        assert_eq!(ranges.len(), 3);
+    }
+
+    #[test]
+    fn folding_range_single_line_no_fold() {
+        let content = "interface api {}";
+        let ranges = get_folding_ranges(content);
+        // Single line should not create a folding range
+        assert_eq!(ranges.len(), 0);
+    }
+
+    #[test]
+    fn folding_range_multiple_interfaces() {
+        let content = r#"interface api {
+    greet: func();
+}
+
+interface internal {
+    log: func(msg: string);
+}"#;
+        let ranges = get_folding_ranges(content);
+        assert_eq!(ranges.len(), 2);
+        // First interface
+        assert_eq!(ranges[0].start_line, 0);
+        assert_eq!(ranges[0].end_line, 2);
+        // Second interface
+        assert_eq!(ranges[1].start_line, 4);
+        assert_eq!(ranges[1].end_line, 6);
+    }
+
+    fn get_document_symbols(content: &str) -> Vec<DocumentSymbol> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let parse = doc.parse().clone();
+                let line_index = doc.line_index.clone();
+                let range_to_lsp = |r: witcraft_syntax::TextRange| -> Range {
+                    let start = line_index.position(r.start());
+                    let end = line_index.position(r.end());
+                    Range {
+                        start: Position { line: start.line, character: start.column },
+                        end: Position { line: end.line, character: end.column },
+                    }
+                };
+
+                let mut symbols = Vec::new();
+                for item in &parse.root.items {
+                    match item {
+                        witcraft_syntax::Item::Interface(iface) => {
+                            #[allow(deprecated)]
+                            symbols.push(DocumentSymbol {
+                                name: iface.name.name.to_string(),
+                                detail: Some("interface".to_string()),
+                                kind: SymbolKind::INTERFACE,
+                                tags: None,
+                                deprecated: None,
+                                range: range_to_lsp(iface.range),
+                                selection_range: range_to_lsp(iface.name.range),
+                                children: None,
+                            });
+                        }
+                        witcraft_syntax::Item::World(world) => {
+                            #[allow(deprecated)]
+                            symbols.push(DocumentSymbol {
+                                name: world.name.name.to_string(),
+                                detail: Some("world".to_string()),
+                                kind: SymbolKind::MODULE,
+                                tags: None,
+                                deprecated: None,
+                                range: range_to_lsp(world.range),
+                                selection_range: range_to_lsp(world.name.range),
+                                children: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                symbols
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn document_symbol_interface() {
+        let content = "interface api {}";
+        let symbols = get_document_symbols(content);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "api");
+        assert_eq!(symbols[0].kind, SymbolKind::INTERFACE);
+    }
+
+    #[test]
+    fn document_symbol_world() {
+        let content = "world my-world {}";
+        let symbols = get_document_symbols(content);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "my-world");
+        assert_eq!(symbols[0].kind, SymbolKind::MODULE);
+    }
+
+    #[test]
+    fn document_symbol_multiple() {
+        let content = r#"interface api {}
+world my-world {}
+interface internal {}"#;
+        let symbols = get_document_symbols(content);
+        assert_eq!(symbols.len(), 3);
+        assert_eq!(symbols[0].name, "api");
+        assert_eq!(symbols[1].name, "my-world");
+        assert_eq!(symbols[2].name, "internal");
+    }
+
+    fn get_hover_at(content: &str, line: u32, character: u32) -> Option<String> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
+                let parse = doc.parse().clone();
+                let index = witcraft_syntax::SymbolIndex::build(&parse.root);
+
+                let node = witcraft_syntax::node_at(&parse.root, offset)?;
+
+                match node {
+                    witcraft_syntax::NodeRef::Interface(iface) => {
+                        Some(format!("interface {}", iface.name.name))
+                    }
+                    witcraft_syntax::NodeRef::World(world) => {
+                        Some(format!("world {}", world.name.name))
+                    }
+                    witcraft_syntax::NodeRef::Record(rec) => {
+                        Some(format!("record {}", rec.name.name))
+                    }
+                    witcraft_syntax::NodeRef::Func(func) => {
+                        Some(format!("func {}", func.name.name))
+                    }
+                    witcraft_syntax::NodeRef::NamedType(named) => {
+                        // Look up the definition
+                        if let Some(def) = index.find_definition(&named.name.name) {
+                            Some(format!("{:?} {}", def.kind, def.name))
+                        } else {
+                            Some(format!("type {}", named.name.name))
+                        }
+                    }
+                    witcraft_syntax::NodeRef::Ident(ident) => {
+                        // Look up what this identifier refers to
+                        if let Some(def) = index.find_definition(&ident.name) {
+                            Some(format!("{:?} {}", def.kind, def.name))
+                        } else {
+                            Some(format!("identifier {}", ident.name))
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .flatten()
+    }
+
+    #[test]
+    fn hover_interface_name() {
+        let content = "interface api {}";
+        let hover = get_hover_at(content, 0, 11); // on "api"
+        assert!(hover.is_some());
+        assert!(hover.unwrap().contains("api"));
+    }
+
+    #[test]
+    fn hover_world_name() {
+        let content = "world my-world {}";
+        let hover = get_hover_at(content, 0, 8); // on "my-world"
+        assert!(hover.is_some());
+        assert!(hover.unwrap().contains("my-world"));
+    }
+
+    #[test]
+    fn hover_record_name() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+    }
+}"#;
+        let hover = get_hover_at(content, 1, 12); // on "user"
+        assert!(hover.is_some());
+        assert!(hover.unwrap().contains("user"));
+    }
+
+    #[test]
+    fn hover_type_reference() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+    }
+    get-user: func() -> user;
+}"#;
+        let hover = get_hover_at(content, 4, 25); // on "user" reference
+        assert!(hover.is_some());
+    }
+
+    fn get_completions_at(content: &str, _line: u32, _character: u32) -> Vec<String> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let parse = doc.parse().clone();
+                let index = witcraft_syntax::SymbolIndex::build(&parse.root);
+
+                let mut items = Vec::new();
+
+                // Add defined types
+                for def in index.definitions() {
+                    items.push(def.name.to_string());
+                }
+
+                // Add primitive types
+                for prim in PRIMITIVE_TYPES {
+                    items.push(prim.to_string());
+                }
+
+                items
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn completion_includes_primitives() {
+        let content = "interface api {}";
+        let completions = get_completions_at(content, 0, 0);
+        assert!(completions.contains(&"string".to_string()));
+        assert!(completions.contains(&"u32".to_string()));
+        assert!(completions.contains(&"bool".to_string()));
+    }
+
+    #[test]
+    fn completion_includes_defined_types() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+    }
+}"#;
+        let completions = get_completions_at(content, 0, 0);
+        assert!(completions.contains(&"user".to_string()));
+    }
+
+    fn format_document(content: &str) -> String {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let parse = doc.parse().clone();
+                witcraft_syntax::Formatter::format(&parse.root)
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn formatting_normalizes_whitespace() {
+        let content = "interface   api   {  }";
+        let formatted = format_document(content);
+        // Formatter normalizes whitespace and adds newlines in braces
+        assert!(formatted.contains("interface api {"));
+        assert!(formatted.contains("}"));
+    }
+
+    #[test]
+    fn formatting_adds_newlines() {
+        let content = "interface api { greet: func(); }";
+        let formatted = format_document(content);
+        assert!(formatted.contains('\n'));
+        assert!(formatted.contains("greet: func();"));
+    }
+
+    #[test]
+    fn formatting_indents_correctly() {
+        let content = "interface api {\ngreet: func();\n}";
+        let formatted = format_document(content);
+        // Should have proper indentation (2 spaces)
+        assert!(formatted.contains("  greet: func();"));
+    }
+
+    #[test]
+    fn formatting_is_idempotent() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+        name: string,
+    }
+    greet: func(name: string) -> string;
+}"#;
+        let first = format_document(content);
+        let second = format_document(&first);
+        assert_eq!(first, second);
+    }
+
+    fn get_diagnostics(content: &str) -> Vec<String> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let parse = doc.parse().clone();
+                let index = witcraft_syntax::SymbolIndex::build(&parse.root);
+
+                let mut diagnostics = Vec::new();
+
+                // Parse errors
+                for err in &parse.errors {
+                    diagnostics.push(err.message.clone());
+                }
+
+                // Undefined types
+                for reference in index.references() {
+                    if index.find_definition(&reference.name).is_none() {
+                        // Check if it's a builtin
+                        let name = &*reference.name;
+                        if !PRIMITIVE_TYPES.contains(&name) && !GENERIC_TYPES.contains(&name) {
+                            diagnostics.push(format!("undefined type: {}", name));
+                        }
+                    }
+                }
+
+                diagnostics
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn diagnostics_parse_error() {
+        let content = "interface api {";  // missing closing brace
+        let diagnostics = get_diagnostics(content);
+        assert!(!diagnostics.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_undefined_type() {
+        let content = r#"interface api {
+    get-user: func() -> unknown-type;
+}"#;
+        let diagnostics = get_diagnostics(content);
+        assert!(diagnostics.iter().any(|d| d.contains("undefined") || d.contains("unknown-type")));
+    }
+
+    #[test]
+    fn diagnostics_valid_file() {
+        let content = r#"interface api {
+    greet: func(name: string) -> string;
+}"#;
+        let diagnostics = get_diagnostics(content);
+        // Should have no diagnostics for valid file
+        assert!(diagnostics.is_empty(), "Expected no diagnostics, got: {:?}", diagnostics);
+    }
+
+    /// Returns the definition location (line, column) for a symbol at the given position
+    fn goto_definition_at(content: &str, line: u32, character: u32) -> Option<(u32, u32)> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
+                let parse = doc.parse().clone();
+                let index = witcraft_syntax::SymbolIndex::build(&parse.root);
+
+                let node = witcraft_syntax::node_at(&parse.root, offset)?;
+
+                let name = match node {
+                    witcraft_syntax::NodeRef::NamedType(named) => named.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Ident(ident) => ident.name.to_string(),
+                    _ => return None,
+                };
+
+                let def = index.find_definition(&name)?;
+                let pos = doc.line_index.position(def.name_range.start());
+                Some((pos.line, pos.column))
+            })
+            .flatten()
+    }
+
+    #[test]
+    fn goto_definition_type_reference() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+    }
+    get-user: func() -> user;
+}"#;
+        // Click on "user" in the return type (line 4, around column 24)
+        let def_pos = goto_definition_at(content, 4, 24);
+        assert!(def_pos.is_some(), "Should find definition");
+        let (line, _col) = def_pos.unwrap();
+        assert_eq!(line, 1, "Definition should be on line 1 (record user)");
+    }
+
+    #[test]
+    fn goto_definition_record_field_type() {
+        let content = r#"interface api {
+    record point {
+        x: u32,
+        y: u32,
+    }
+    record line {
+        start: point,
+        end: point,
+    }
+}"#;
+        // Click on "point" in "start: point" (line 6, around column 15)
+        let def_pos = goto_definition_at(content, 6, 15);
+        assert!(def_pos.is_some(), "Should find definition");
+        let (line, _col) = def_pos.unwrap();
+        assert_eq!(line, 1, "Definition should be on line 1 (record point)");
+    }
+
+    #[test]
+    fn goto_definition_variant_type() {
+        let content = r#"interface api {
+    record error-info {
+        code: u32,
+    }
+    variant my-result {
+        ok(string),
+        err(error-info),
+    }
+}"#;
+        // Click on "error-info" in variant case (line 6, around column 12)
+        let def_pos = goto_definition_at(content, 6, 12);
+        assert!(def_pos.is_some(), "Should find definition");
+        let (line, _col) = def_pos.unwrap();
+        assert_eq!(line, 1, "Definition should be on line 1 (record error-info)");
+    }
+
+    #[test]
+    fn goto_definition_not_found() {
+        let content = r#"interface api {
+    get-user: func() -> unknown-type;
+}"#;
+        // Click on "unknown-type" - should not find definition
+        let def_pos = goto_definition_at(content, 1, 25);
+        assert!(def_pos.is_none(), "Should not find definition for undefined type");
+    }
+
+    /// Returns all reference locations (line, column) for a symbol at the given position
+    fn find_references_at(content: &str, line: u32, character: u32) -> Vec<(u32, u32)> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
+                let parse = doc.parse().clone();
+                let index = witcraft_syntax::SymbolIndex::build(&parse.root);
+
+                let node = witcraft_syntax::node_at(&parse.root, offset)?;
+
+                let name = match node {
+                    witcraft_syntax::NodeRef::NamedType(named) => named.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Ident(ident) => ident.name.to_string(),
+                    witcraft_syntax::NodeRef::Record(rec) => rec.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Variant(var) => var.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Enum(e) => e.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Flags(f) => f.name.name.to_string(),
+                    witcraft_syntax::NodeRef::TypeAlias(alias) => alias.name.name.to_string(),
+                    _ => return None,
+                };
+
+                let mut locations = Vec::new();
+
+                // Include the definition itself
+                if let Some(def) = index.find_definition(&name) {
+                    let pos = doc.line_index.position(def.name_range.start());
+                    locations.push((pos.line, pos.column));
+                }
+
+                // Add all references
+                for reference in index.references() {
+                    if &*reference.name == name {
+                        let pos = doc.line_index.position(reference.range.start());
+                        locations.push((pos.line, pos.column));
+                    }
+                }
+
+                Some(locations)
+            })
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn references_single_usage() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+    }
+    get-user: func() -> user;
+}"#;
+        // Find references to "user" from the definition
+        let refs = find_references_at(content, 1, 11);
+        assert_eq!(refs.len(), 2, "Should find definition + 1 reference");
+    }
+
+    #[test]
+    fn references_multiple_usages() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+    }
+    get-user: func() -> user;
+    create-user: func(u: user) -> user;
+    delete-user: func(u: user);
+}"#;
+        // Find references to "user"
+        let refs = find_references_at(content, 1, 11);
+        assert_eq!(refs.len(), 5, "Should find definition + 4 references");
+    }
+
+    #[test]
+    fn references_no_usages() {
+        let content = r#"interface api {
+    record unused-type {
+        id: u64,
+    }
+    greet: func() -> string;
+}"#;
+        // Find references to "unused-type"
+        let refs = find_references_at(content, 1, 11);
+        assert_eq!(refs.len(), 1, "Should find only the definition");
+    }
+
+    #[test]
+    fn references_from_usage_site() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+    }
+    get-user: func() -> user;
+}"#;
+        // Find references from a usage site (not the definition)
+        let refs = find_references_at(content, 4, 24);
+        assert_eq!(refs.len(), 2, "Should find definition + 1 reference");
+    }
+
+    /// Simulates rename and returns all edit locations (line, column)
+    fn get_rename_locations(content: &str, line: u32, character: u32) -> Vec<(u32, u32)> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
+                let parse = doc.parse().clone();
+                let index = witcraft_syntax::SymbolIndex::build(&parse.root);
+
+                let node = witcraft_syntax::node_at(&parse.root, offset)?;
+
+                let name = match node {
+                    witcraft_syntax::NodeRef::NamedType(named) => named.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Ident(ident) => ident.name.to_string(),
+                    witcraft_syntax::NodeRef::Record(rec) => rec.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Variant(var) => var.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Enum(e) => e.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Flags(f) => f.name.name.to_string(),
+                    witcraft_syntax::NodeRef::TypeAlias(alias) => alias.name.name.to_string(),
+                    witcraft_syntax::NodeRef::Func(func) => func.name.name.to_string(),
+                    _ => return None,
+                };
+
+                let mut locations = Vec::new();
+
+                // Definition location
+                if let Some(def) = index.find_definition(&name) {
+                    let pos = doc.line_index.position(def.name_range.start());
+                    locations.push((pos.line, pos.column));
+                }
+
+                // Reference locations
+                for reference in index.references() {
+                    if &*reference.name == name {
+                        let pos = doc.line_index.position(reference.range.start());
+                        locations.push((pos.line, pos.column));
+                    }
+                }
+
+                Some(locations)
+            })
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn rename_type_with_references() {
+        let content = r#"interface api {
+    record user {
+        id: u64,
+    }
+    get-user: func() -> user;
+    create-user: func(u: user) -> user;
+}"#;
+        // Rename "user" - should find all locations to rename
+        let locations = get_rename_locations(content, 1, 11);
+        assert_eq!(locations.len(), 4, "Should rename definition + 3 references");
+    }
+
+    #[test]
+    fn rename_function() {
+        let content = r#"interface api {
+    greet: func(name: string) -> string;
+}"#;
+        // Rename "greet"
+        let locations = get_rename_locations(content, 1, 6);
+        assert_eq!(locations.len(), 1, "Should find function definition");
+    }
+
+    #[test]
+    fn rename_enum() {
+        let content = r#"interface api {
+    enum status {
+        pending,
+        active,
+    }
+    get-status: func() -> status;
+    set-status: func(s: status);
+}"#;
+        // Rename "status"
+        let locations = get_rename_locations(content, 1, 9);
+        assert_eq!(locations.len(), 3, "Should rename definition + 2 references");
+    }
+
+    #[test]
+    fn rename_unused_type() {
+        let content = r#"interface api {
+    record orphan {
+        id: u64,
+    }
+}"#;
+        // Rename "orphan" - only the definition
+        let locations = get_rename_locations(content, 1, 11);
+        assert_eq!(locations.len(), 1, "Should only rename the definition");
+    }
+
+    #[test]
+    fn signature_help_result_first_param() {
+        let content = "type foo = result<";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "result<ok-type, err-type>");
+        assert_eq!(help.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn signature_help_result_second_param() {
+        let content = "type foo = result<string, ";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "result<ok-type, err-type>");
+        assert_eq!(help.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn signature_help_option() {
+        let content = "type foo = option<";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "option<inner-type>");
+        assert_eq!(help.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn signature_help_list() {
+        let content = "type foo = list<";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "list<element-type>");
+    }
+
+    #[test]
+    fn signature_help_tuple() {
+        let content = "type foo = tuple<string, u32, ";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "tuple<T, U, ...>");
+        assert_eq!(help.active_parameter, Some(2)); // third param
+    }
+
+    #[test]
+    fn signature_help_func() {
+        let content = "interface api { greet: func(";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "func(name: type, ...) -> return-type");
+    }
+
+    #[test]
+    fn signature_help_func_second_param() {
+        let content = "interface api { greet: func(name: string, ";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn signature_help_constructor() {
+        let content = "resource file { constructor(";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "constructor(name: type, ...)");
+    }
+
+    #[test]
+    fn signature_help_borrow() {
+        let content = "type handle = borrow<";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "borrow<resource-name>");
+    }
+
+    #[test]
+    fn signature_help_own() {
+        let content = "type handle = own<";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "own<resource-name>");
+    }
+
+    #[test]
+    fn signature_help_nested_generic() {
+        // Inside nested result, should detect the outer result
+        let content = "type foo = result<option<string>, ";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_some());
+        let help = help.unwrap();
+        assert_eq!(help.signatures[0].label, "result<ok-type, err-type>");
+        assert_eq!(help.active_parameter, Some(1)); // second param of result
+    }
+
+    #[test]
+    fn signature_help_no_context() {
+        let content = "interface api {";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_none());
+    }
+
+    #[test]
+    fn signature_help_after_close() {
+        let content = "type foo = result<string, error>";
+        let help = find_signature_context(content, content.len());
+        assert!(help.is_none()); // cursor is after closing >
+    }
+
+    fn get_inlay_hints(content: &str) -> Vec<InlayHint> {
+        let store = make_store_with_doc(content);
+        let workspace = Arc::new(WorkspaceManager::new());
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let parse = doc.parse().clone();
+                collect_inlay_hints(&parse.root, &workspace, "file:///test.wit", &doc.line_index)
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn inlay_hint_type_alias_primitive() {
+        let hints = get_inlay_hints("interface api { type my-string = string; }");
+        assert_eq!(hints.len(), 1);
+        let label = match &hints[0].label {
+            InlayHintLabel::String(s) => s.as_str(),
+            _ => panic!("expected string label"),
+        };
+        assert_eq!(label, ": string");
+    }
+
+    #[test]
+    fn inlay_hint_type_alias_list() {
+        let hints = get_inlay_hints("interface api { type names = list<string>; }");
+        assert_eq!(hints.len(), 1);
+        let label = match &hints[0].label {
+            InlayHintLabel::String(s) => s.as_str(),
+            _ => panic!("expected string label"),
+        };
+        assert_eq!(label, ": list<string>");
+    }
+
+    #[test]
+    fn inlay_hint_type_alias_result() {
+        let hints = get_inlay_hints("interface api { type response = result<string, u32>; }");
+        assert_eq!(hints.len(), 1);
+        let label = match &hints[0].label {
+            InlayHintLabel::String(s) => s.as_str(),
+            _ => panic!("expected string label"),
+        };
+        assert_eq!(label, ": result<string, u32>");
+    }
+
+    #[test]
+    fn inlay_hint_type_alias_too_long() {
+        let hints = get_inlay_hints(
+            "interface api { type resp = result<list<tuple<string, string, string>>, list<u32>>; }",
+        );
+        assert_eq!(hints.len(), 0);
+    }
+
+    #[test]
+    fn inlay_hint_no_hints_for_record() {
+        let hints = get_inlay_hints("interface api { record foo { x: u32, } }");
+        assert_eq!(hints.len(), 0);
+    }
+
+    #[test]
+    fn inlay_hint_multiple_aliases() {
+        let hints = get_inlay_hints(
+            "interface api { type a = u32; type b = string; type c = list<u8>; }",
+        );
+        assert_eq!(hints.len(), 3);
+    }
+
+    fn get_document_highlights(content: &str, line: u32, col: u32) -> Vec<DocumentHighlight> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, col))?;
+                let parse = doc.parse();
+                let index = SymbolIndex::build(&parse.root);
+                let node = node_at(&parse.root, offset)?;
+
+                let name = match node {
+                    NodeRef::NamedType(named) => named.name.name.to_string(),
+                    NodeRef::Ident(ident) => ident.name.to_string(),
+                    NodeRef::Interface(iface) => iface.name.name.to_string(),
+                    NodeRef::Record(rec) => rec.name.name.to_string(),
+                    NodeRef::TypeAlias(alias) => alias.name.name.to_string(),
+                    _ => return None,
+                };
+
+                let mut highlights = Vec::new();
+
+                if let Some(def) = index.find_definition(&name) {
+                    highlights.push(DocumentHighlight {
+                        range: doc.range_to_lsp(def.name_range),
+                        kind: Some(DocumentHighlightKind::TEXT),
+                    });
+                }
+
+                for reference in index.references() {
+                    if &*reference.name == name {
+                        highlights.push(DocumentHighlight {
+                            range: doc.range_to_lsp(reference.range),
+                            kind: Some(DocumentHighlightKind::READ),
+                        });
+                    }
+                }
+
+                Some(highlights)
+            })
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn document_highlight_type_definition() {
+        let content = "interface api { record foo { x: u32, } type bar = foo; }";
+        let highlights = get_document_highlights(content, 0, 23);
+        assert_eq!(highlights.len(), 2);
+        assert_eq!(highlights[0].kind, Some(DocumentHighlightKind::TEXT));
+        assert_eq!(highlights[1].kind, Some(DocumentHighlightKind::READ));
+    }
+
+    #[test]
+    fn document_highlight_from_reference() {
+        let content = "interface api { record foo { x: u32, } type bar = foo; }";
+        let highlights = get_document_highlights(content, 0, 50);
+        assert_eq!(highlights.len(), 2);
+    }
+
+    #[test]
+    fn document_highlight_no_references() {
+        let content = "interface api { record foo { x: u32, } }";
+        let highlights = get_document_highlights(content, 0, 23);
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].kind, Some(DocumentHighlightKind::TEXT));
+    }
+
+    #[test]
+    fn document_highlight_multiple_references() {
+        let content = "interface api { record foo { x: u32, } type a = foo; type b = foo; }";
+        let highlights = get_document_highlights(content, 0, 23);
+        assert_eq!(highlights.len(), 3);
+    }
+
+    #[test]
+    fn document_highlight_interface_name() {
+        let content = "interface api { record foo { x: u32, } }";
+        let highlights = get_document_highlights(content, 0, 10);
+        assert_eq!(highlights.len(), 1);
+        assert_eq!(highlights[0].kind, Some(DocumentHighlightKind::TEXT));
+    }
+
+    fn get_selection_range(content: &str, line: u32, col: u32) -> SelectionRange {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let parse = doc.parse().clone();
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, col))?;
+                Some(build_selection_range(&parse.root, offset, &doc.line_index))
+            })
+            .flatten()
+            .unwrap()
+    }
+
+    fn count_selection_levels(sel: &SelectionRange) -> usize {
+        let mut count = 1;
+        let mut current = sel.parent.as_ref();
+        while let Some(p) = current {
+            count += 1;
+            current = p.parent.as_ref();
+        }
+        count
+    }
+
+    #[test]
+    fn selection_range_record_field_name() {
+        let content = "interface api { record foo { x: u32, } }";
+        let sel = get_selection_range(content, 0, 28);
+        assert!(count_selection_levels(&sel) >= 4);
+    }
+
+    #[test]
+    fn selection_range_type_in_field() {
+        let content = "interface api { record foo { x: u32, } }";
+        let sel = get_selection_range(content, 0, 32);
+        assert!(count_selection_levels(&sel) >= 4);
+    }
+
+    #[test]
+    fn selection_range_nested_type() {
+        let content = "interface api { type foo = list<string>; }";
+        let sel = get_selection_range(content, 0, 32);
+        assert!(count_selection_levels(&sel) >= 5);
+    }
+
+    #[test]
+    fn selection_range_interface_name() {
+        let content = "interface api { record foo { x: u32, } }";
+        let sel = get_selection_range(content, 0, 10);
+        assert!(count_selection_levels(&sel) >= 3);
+    }
+
+    #[test]
+    fn selection_range_expands_outward() {
+        let content = "interface api { record foo { x: u32, } }";
+        let sel = get_selection_range(content, 0, 28);
+        let mut current = &sel;
+        let mut prev_size = 0;
+        loop {
+            let size = (current.range.end.character - current.range.start.character) as usize
+                + (current.range.end.line - current.range.start.line) as usize * 100;
+            assert!(size >= prev_size);
+            prev_size = size;
+            match &current.parent {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+    }
+
+    fn get_code_lenses(content: &str) -> Vec<CodeLens> {
+        let store = make_store_with_doc(content);
+        store
+            .with_document_mut("file:///test.wit", |doc| {
+                let parse = doc.parse().clone();
+                let index = SymbolIndex::build(&parse.root);
+                Some(collect_code_lenses(&index, &doc.line_index))
+            })
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn code_lens_shows_references() {
+        let content = "interface api { record foo { x: u32, } type bar = foo; }";
+        let lenses = get_code_lenses(content);
+        assert_eq!(lenses.len(), 1);
+        assert!(lenses[0].command.as_ref().unwrap().title.contains("1 reference"));
+    }
+
+    #[test]
+    fn code_lens_multiple_references() {
+        let content = "interface api { record foo { x: u32, } type a = foo; type b = foo; }";
+        let lenses = get_code_lenses(content);
+        assert_eq!(lenses.len(), 1);
+        assert!(lenses[0].command.as_ref().unwrap().title.contains("2 references"));
+    }
+
+    #[test]
+    fn code_lens_no_references() {
+        let content = "interface api { record foo { x: u32, } }";
+        let lenses = get_code_lenses(content);
+        assert_eq!(lenses.len(), 0);
+    }
+
+    #[test]
+    fn code_lens_multiple_definitions_with_refs() {
+        let content = "interface api { record a { x: u32, } record b { y: a, } type c = a; }";
+        let lenses = get_code_lenses(content);
+        assert_eq!(lenses.len(), 1);
+        assert!(lenses[0].command.as_ref().unwrap().title.contains("2 references"));
+    }
 }

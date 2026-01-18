@@ -73,9 +73,17 @@ impl ParseError {
 
     pub fn unclosed(what: &str, opened_at: TextRange, range: TextRange) -> Self {
         Self::new(
-            format!("unclosed {}", what),
+            format!("unclosed {} (opened at byte {})", what, opened_at.start()),
             range,
             ErrorKind::Unclosed { opened_at },
+        )
+    }
+
+    pub fn expected_in_context(expected: &str, found: &str, context: &str, range: TextRange) -> Self {
+        Self::new(
+            format!("expected {} in {}, found {}", expected, context, found),
+            range,
+            ErrorKind::Other,
         )
     }
 }

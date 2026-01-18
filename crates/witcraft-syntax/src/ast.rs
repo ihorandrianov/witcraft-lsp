@@ -1,6 +1,13 @@
 use crate::TextRange;
+use smallvec::SmallVec;
+use std::sync::Arc;
 
-// ==================== FEATURE GATES ====================
+/// SmallVec for very small collections (gates, namespace segments).
+pub type SmallVec2<T> = SmallVec<[T; 2]>;
+/// SmallVec for small collections (params, use names).
+pub type SmallVec4<T> = SmallVec<[T; 4]>;
+/// SmallVec for medium collections (record fields, enum/variant cases).
+pub type SmallVec8<T> = SmallVec<[T; 8]>;
 
 /// Feature gate annotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +54,7 @@ pub struct DeprecatedGate {
 /// Collection of gates that can be attached to an item.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Gates {
-    pub gates: Vec<Gate>,
+    pub gates: SmallVec2<Gate>,
 }
 
 impl Gates {
@@ -56,19 +63,17 @@ impl Gates {
     }
 }
 
-// ==================== IDENTIFIERS ====================
-
 /// An identifier with its source location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ident {
-    pub name: String,
+    pub name: Arc<str>,
     pub range: TextRange,
 }
 
 impl Ident {
-    pub fn new(name: impl Into<String>, range: TextRange) -> Self {
+    pub fn new(name: impl AsRef<str>, range: TextRange) -> Self {
         Self {
-            name: name.into(),
+            name: Arc::from(name.as_ref()),
             range,
         }
     }
@@ -113,11 +118,11 @@ impl Default for SourceFile {
 pub struct PackageDecl {
     pub docs: Option<DocComment>,
     /// Namespace segments (at least one). E.g., `foo:bar:baz` has `[foo, bar]`.
-    pub namespace: Vec<Ident>,
+    pub namespace: SmallVec2<Ident>,
     /// Package name. E.g., `foo:bar:baz` has name `baz`.
     pub name: Ident,
     /// Nested package segments (zero or more). E.g., `foo:bar/quux/deep` has `[quux, deep]`.
-    pub nested: Vec<Ident>,
+    pub nested: SmallVec2<Ident>,
     pub version: Option<Version>,
     pub range: TextRange,
 }
@@ -283,7 +288,7 @@ pub struct ExportDecl {
 pub struct IncludeDecl {
     pub docs: Option<DocComment>,
     pub path: UsePath,
-    pub with: Vec<IncludeNameItem>,
+    pub with: SmallVec4<IncludeNameItem>,
     pub range: TextRange,
 }
 
@@ -311,7 +316,7 @@ pub enum ExternKind {
 pub struct InterfaceUse {
     pub docs: Option<DocComment>,
     pub path: UsePath,
-    pub names: Vec<UseNameItem>,
+    pub names: SmallVec4<UseNameItem>,
     pub range: TextRange,
 }
 
@@ -337,7 +342,7 @@ pub struct FuncDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncSignature {
     pub is_async: bool,
-    pub params: Vec<Param>,
+    pub params: SmallVec4<Param>,
     pub results: FuncResults,
     pub range: TextRange,
 }
@@ -358,7 +363,7 @@ pub enum FuncResults {
     /// Single anonymous return: `-> T`
     Anon(Type),
     /// Named returns: `-> (a: T, b: U)`
-    Named(Vec<Param>),
+    Named(SmallVec4<Param>),
 }
 
 /// Type definitions.
@@ -429,7 +434,7 @@ pub struct RecordDecl {
     pub gates: Gates,
     pub docs: Option<DocComment>,
     pub name: Ident,
-    pub fields: Vec<RecordField>,
+    pub fields: SmallVec8<RecordField>,
     pub range: TextRange,
 }
 
@@ -448,7 +453,7 @@ pub struct VariantDecl {
     pub gates: Gates,
     pub docs: Option<DocComment>,
     pub name: Ident,
-    pub cases: Vec<VariantCase>,
+    pub cases: SmallVec8<VariantCase>,
     pub range: TextRange,
 }
 
@@ -467,7 +472,7 @@ pub struct EnumDecl {
     pub gates: Gates,
     pub docs: Option<DocComment>,
     pub name: Ident,
-    pub cases: Vec<EnumCase>,
+    pub cases: SmallVec8<EnumCase>,
     pub range: TextRange,
 }
 
@@ -485,7 +490,7 @@ pub struct FlagsDecl {
     pub gates: Gates,
     pub docs: Option<DocComment>,
     pub name: Ident,
-    pub flags: Vec<FlagCase>,
+    pub flags: SmallVec8<FlagCase>,
     pub range: TextRange,
 }
 
@@ -530,7 +535,7 @@ impl ResourceItem {
 pub struct ConstructorDecl {
     pub gates: Gates,
     pub docs: Option<DocComment>,
-    pub params: Vec<Param>,
+    pub params: SmallVec4<Param>,
     pub result: Option<Type>,
     pub range: TextRange,
 }
@@ -569,7 +574,7 @@ pub enum Type {
     /// Result type: `result<T, E>` or `result<_, E>` or `result<T>`
     Result(Box<ResultType>),
     /// Tuple type: `tuple<T, U, V>`
-    Tuple(TupleType),
+    Tuple(Box<TupleType>),
     /// Borrow handle: `borrow<T>`
     Borrow(Box<HandleType>),
     /// Own handle: `own<T>`
@@ -653,7 +658,7 @@ pub struct ResultType {
 /// Tuple type: `tuple<T, U, V>`
 #[derive(Debug, Clone, PartialEq)]
 pub struct TupleType {
-    pub elements: Vec<Type>,
+    pub elements: SmallVec4<Type>,
     pub range: TextRange,
 }
 

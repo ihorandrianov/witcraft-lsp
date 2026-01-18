@@ -21,4 +21,4 @@ pub use parser::parse;
 pub use text::{LineIndex, Position, TextRange};
 
 // Re-export commonly used AST types at crate root
-pub use ast::SourceFile;
+pub use ast::{InterfaceItem, InterfaceUse, Item, SourceFile, Type, TypeAlias, TypeDef, WorldItem};

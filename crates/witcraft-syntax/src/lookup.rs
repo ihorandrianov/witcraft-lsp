@@ -101,7 +101,6 @@ impl<'a> NodeRef<'a> {
 
 /// Find the most specific node at a given offset.
 pub fn node_at(source: &SourceFile, offset: u32) -> Option<NodeRef<'_>> {
-    // Check package declaration
     if let Some(pkg) = &source.package {
         if pkg.range.contains(offset) {
             for ns in &pkg.namespace {
@@ -121,7 +120,6 @@ pub fn node_at(source: &SourceFile, offset: u32) -> Option<NodeRef<'_>> {
         }
     }
 
-    // Check top-level items
     for item in &source.items {
         if !item.range().contains(offset) {
             continue;
