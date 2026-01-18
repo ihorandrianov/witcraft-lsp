@@ -278,9 +278,7 @@ pub fn lex(source: &str) -> Vec<Token> {
 /// Lex the source, returning only non-trivia tokens.
 /// Useful for parsing where whitespace/comments are not needed.
 pub fn lex_non_trivia(source: &str) -> Vec<Token> {
-    Lexer::new(source)
-        .filter(|t| !t.kind.is_trivia())
-        .collect()
+    Lexer::new(source).filter(|t| !t.kind.is_trivia()).collect()
 }
 
 #[cfg(test)]

@@ -26,12 +26,7 @@ impl<'a> CrossFileResolver<'a> {
     /// 1. Check local definitions (types defined in the same interface)
     /// 2. Check imported names (via `use` statements)
     /// 3. Check builtin types
-    pub fn resolve_type(
-        &self,
-        uri: &str,
-        name: &str,
-        local_index: &SymbolIndex,
-    ) -> ResolveResult {
+    pub fn resolve_type(&self, uri: &str, name: &str, local_index: &SymbolIndex) -> ResolveResult {
         // 1. Check local definitions first
         if let Some(def) = local_index.find_definition(name) {
             return ResolveResult::Found(GlobalDefinition::from_definition(def, uri));
@@ -59,13 +54,15 @@ impl<'a> CrossFileResolver<'a> {
     fn resolve_import(&self, uri: &str, import: &Import) -> Option<GlobalDefinition> {
         // Look up the original name in the workspace
         // The import.from_interface tells us which interface to look in
-        self.workspace
-            .find_definition(uri, &import.original_name)
+        self.workspace.find_definition(uri, &import.original_name)
     }
 
     /// Check if a type reference is valid (defined or builtin).
     pub fn is_type_defined(&self, uri: &str, name: &str, local_index: &SymbolIndex) -> bool {
-        !matches!(self.resolve_type(uri, name, local_index), ResolveResult::NotFound)
+        !matches!(
+            self.resolve_type(uri, name, local_index),
+            ResolveResult::NotFound
+        )
     }
 
     /// Find all references to a symbol across the package.
@@ -118,7 +115,8 @@ impl<'a> CrossFileResolver<'a> {
         let all_defs = self.workspace.all_definitions(uri);
 
         for reference in local_index.references() {
-            if reference.kind == witcraft_syntax::ReferenceKind::Type && !reference.name.is_empty() {
+            if reference.kind == witcraft_syntax::ReferenceKind::Type && !reference.name.is_empty()
+            {
                 if matches!(
                     self.resolve_type(uri, &reference.name, local_index),
                     ResolveResult::NotFound
@@ -160,12 +158,7 @@ impl<'a> CrossFileResolver<'a> {
             // Exact match - type exists but not imported
             if def.name.as_ref() == name {
                 if let Some(parent) = &def.parent {
-                    let file = def
-                        .uri
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&def.uri)
-                        .to_string();
+                    let file = def.uri.rsplit('/').next().unwrap_or(&def.uri).to_string();
                     available_in.push(AvailableType {
                         interface: parent.to_string(),
                         file,
@@ -189,7 +182,9 @@ impl<'a> CrossFileResolver<'a> {
         similar_names.sort_by(|a, b| {
             let sim_a = name_similarity(name, &a.name);
             let sim_b = name_similarity(name, &b.name);
-            sim_b.partial_cmp(&sim_a).unwrap_or(std::cmp::Ordering::Equal)
+            sim_b
+                .partial_cmp(&sim_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Limit to top 3 suggestions
@@ -415,10 +410,23 @@ mod tests {
         let api_index = witcraft_syntax::SymbolIndex::build(&api_result.root);
 
         // Verify imports were indexed
-        assert_eq!(api_index.imports().len(), 2, "should have 2 imports: user, post");
-        assert!(api_index.find_import("user").is_some(), "user should be imported");
-        assert!(api_index.find_import("post").is_some(), "post should be imported");
-        assert!(api_index.find_import("status").is_none(), "status should NOT be imported");
+        assert_eq!(
+            api_index.imports().len(),
+            2,
+            "should have 2 imports: user, post"
+        );
+        assert!(
+            api_index.find_import("user").is_some(),
+            "user should be imported"
+        );
+        assert!(
+            api_index.find_import("post").is_some(),
+            "post should be imported"
+        );
+        assert!(
+            api_index.find_import("status").is_none(),
+            "status should NOT be imported"
+        );
 
         // Set up workspace with both files
         let workspace = WorkspaceManager::new();
@@ -430,14 +438,20 @@ mod tests {
         // 'user' should be found (imported and defined in types.wit)
         let resolve = resolver.resolve_type("file:///project/api.wit", "user", &api_index);
         assert!(
-            matches!(resolve, ResolveResult::Found(_) | ResolveResult::Imported(_)),
+            matches!(
+                resolve,
+                ResolveResult::Found(_) | ResolveResult::Imported(_)
+            ),
             "user should be found via import"
         );
 
         // 'post' should be found (imported and defined in types.wit)
         let resolve = resolver.resolve_type("file:///project/api.wit", "post", &api_index);
         assert!(
-            matches!(resolve, ResolveResult::Found(_) | ResolveResult::Imported(_)),
+            matches!(
+                resolve,
+                ResolveResult::Found(_) | ResolveResult::Imported(_)
+            ),
             "post should be found via import"
         );
 
@@ -450,17 +464,29 @@ mod tests {
 
         // 'nonexistent' should NOT be found
         let resolve = resolver.resolve_type("file:///project/api.wit", "nonexistent", &api_index);
-        assert!(matches!(resolve, ResolveResult::NotFound), "nonexistent should not be found");
+        assert!(
+            matches!(resolve, ResolveResult::NotFound),
+            "nonexistent should not be found"
+        );
 
         // 'u64' should be recognized as builtin
         let resolve = resolver.resolve_type("file:///project/api.wit", "u64", &api_index);
-        assert!(matches!(resolve, ResolveResult::Builtin), "u64 should be builtin");
+        assert!(
+            matches!(resolve, ResolveResult::Builtin),
+            "u64 should be builtin"
+        );
 
         // Check undefined types - both 'status' and 'nonexistent' should be undefined
         let undefined = resolver.find_undefined_types("file:///project/api.wit", &api_index);
         let names: Vec<_> = undefined.iter().map(|u| &*u.name).collect();
-        assert!(names.contains(&"status"), "status should be undefined (not imported)");
-        assert!(names.contains(&"nonexistent"), "nonexistent should be undefined");
+        assert!(
+            names.contains(&"status"),
+            "status should be undefined (not imported)"
+        );
+        assert!(
+            names.contains(&"nonexistent"),
+            "nonexistent should be undefined"
+        );
         assert_eq!(undefined.len(), 2, "should have 2 undefined types");
     }
 

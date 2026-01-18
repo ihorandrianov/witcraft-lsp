@@ -3,7 +3,7 @@
 //! These tests verify that the parser correctly handles actual WASI interface
 //! definitions from the WebAssembly/wasi-* repositories.
 
-use witcraft_syntax::{ast::Item, node_at, parse, LineIndex, SymbolIndex};
+use witcraft_syntax::{LineIndex, SymbolIndex, ast::Item, node_at, parse};
 
 const WASI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/wasi");
 
@@ -39,7 +39,11 @@ fn parse_wasi_io_error() {
     let content = read_wasi_file("error.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "error.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "error.wit parse errors: {:?}",
+        result.errors
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "error");
@@ -55,12 +59,20 @@ fn parse_wasi_io_streams() {
     let content = read_wasi_file("streams.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "streams.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "streams.wit parse errors: {:?}",
+        result.errors
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "streams");
         // uses + stream-error variant + input-stream + output-stream resources
-        assert!(iface.items.len() >= 4, "expected at least 4 items, got {}", iface.items.len());
+        assert!(
+            iface.items.len() >= 4,
+            "expected at least 4 items, got {}",
+            iface.items.len()
+        );
     } else {
         panic!("expected interface");
     }
@@ -71,7 +83,11 @@ fn parse_wasi_clocks_wall_clock() {
     let content = read_wasi_file("wall-clock.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "wall-clock.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "wall-clock.wit parse errors: {:?}",
+        result.errors
+    );
 
     let pkg = result.root.package.as_ref().expect("should have package");
     assert_eq!(pkg.namespace[0].name.as_ref(), "wasi");
@@ -91,7 +107,11 @@ fn parse_wasi_clocks_monotonic_clock() {
     let content = read_wasi_file("monotonic-clock.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "monotonic-clock.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "monotonic-clock.wit parse errors: {:?}",
+        result.errors
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "monotonic-clock");
@@ -105,7 +125,11 @@ fn parse_wasi_random_random() {
     let content = read_wasi_file("random.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "random.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "random.wit parse errors: {:?}",
+        result.errors
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "random");
@@ -119,7 +143,11 @@ fn parse_wasi_random_insecure() {
     let content = read_wasi_file("insecure.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "insecure.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "insecure.wit parse errors: {:?}",
+        result.errors
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "insecure");
@@ -135,7 +163,11 @@ fn parse_wasi_random_insecure_seed() {
     let content = read_wasi_file("insecure-seed.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "insecure-seed.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "insecure-seed.wit parse errors: {:?}",
+        result.errors
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "insecure-seed");
@@ -149,15 +181,26 @@ fn parse_wasi_http_types() {
     let content = read_wasi_file("http-types.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "http-types.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "http-types.wit parse errors: {:?}",
+        result.errors
+    );
 
     // http-types.wit is an interface file without a package declaration
-    assert!(result.root.items.len() >= 1, "should have at least one item");
+    assert!(
+        result.root.items.len() >= 1,
+        "should have at least one item"
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "types");
         // This is a large interface with many items
-        assert!(iface.items.len() > 20, "expected many items in http types, got {}", iface.items.len());
+        assert!(
+            iface.items.len() > 20,
+            "expected many items in http types, got {}",
+            iface.items.len()
+        );
     } else {
         panic!("expected interface");
     }
@@ -168,7 +211,11 @@ fn parse_wasi_http_handler() {
     let content = read_wasi_file("http-handler.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "http-handler.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "http-handler.wit parse errors: {:?}",
+        result.errors
+    );
 }
 
 #[test]
@@ -176,7 +223,11 @@ fn parse_wasi_cli_command() {
     let content = read_wasi_file("command.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "command.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "command.wit parse errors: {:?}",
+        result.errors
+    );
 
     let pkg = result.root.package.as_ref().expect("should have package");
     assert_eq!(pkg.namespace[0].name.as_ref(), "wasi");
@@ -202,12 +253,20 @@ fn parse_wasi_filesystem_types() {
     let content = read_wasi_file("filesystem-types.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "filesystem-types.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "filesystem-types.wit parse errors: {:?}",
+        result.errors
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "types");
         // Large interface with many types and functions
-        assert!(iface.items.len() > 15, "expected many items in filesystem types, got {}", iface.items.len());
+        assert!(
+            iface.items.len() > 15,
+            "expected many items in filesystem types, got {}",
+            iface.items.len()
+        );
     } else {
         panic!("expected interface");
     }
@@ -218,7 +277,11 @@ fn parse_wasi_sockets_network() {
     let content = read_wasi_file("network.wit");
     let result = parse(&content);
 
-    assert!(result.is_ok(), "network.wit parse errors: {:?}", result.errors);
+    assert!(
+        result.is_ok(),
+        "network.wit parse errors: {:?}",
+        result.errors
+    );
 
     if let Item::Interface(iface) = &result.root.items[0] {
         assert_eq!(iface.name.name.as_ref(), "network");
@@ -279,11 +342,18 @@ fn find_definitions_in_wasi_io_streams() {
 
     // Should find stream-error, input-stream, output-stream definitions
     let defs = index.definitions();
-    assert!(defs.len() >= 3, "expected at least 3 definitions, got {}", defs.len());
+    assert!(
+        defs.len() >= 3,
+        "expected at least 3 definitions, got {}",
+        defs.len()
+    );
 
     // Check specific definitions exist
     let def_names: Vec<_> = defs.iter().map(|d| d.name.as_ref()).collect();
-    assert!(def_names.contains(&"streams"), "should have 'streams' interface");
+    assert!(
+        def_names.contains(&"streams"),
+        "should have 'streams' interface"
+    );
 }
 
 #[test]
@@ -296,7 +366,11 @@ fn find_definitions_in_wasi_http_types() {
 
     let defs = index.definitions();
     // http-types has many definitions: types interface, method, scheme, error-code, fields, etc.
-    assert!(defs.len() >= 10, "expected at least 10 definitions, got {}", defs.len());
+    assert!(
+        defs.len() >= 10,
+        "expected at least 10 definitions, got {}",
+        defs.len()
+    );
 }
 
 #[test]

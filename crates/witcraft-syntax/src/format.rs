@@ -1,7 +1,7 @@
+use crate::SyntaxKind;
 use crate::ast::*;
 use crate::lexer::Token;
 use crate::parse::ParseResult;
-use crate::SyntaxKind;
 
 /// A comment extracted from source.
 #[derive(Debug, Clone)]
@@ -885,7 +885,13 @@ fn needs_blank_line_between(prev: &InterfaceItem, current: &InterfaceItem) -> bo
 fn needs_blank_line_between_world_items(prev: &WorldItem, current: &WorldItem) -> bool {
     match (prev, current) {
         // After use statements
-        (WorldItem::Use(_), WorldItem::Import(_) | WorldItem::Export(_) | WorldItem::Include(_) | WorldItem::TypeDef(_)) => true,
+        (
+            WorldItem::Use(_),
+            WorldItem::Import(_)
+            | WorldItem::Export(_)
+            | WorldItem::Include(_)
+            | WorldItem::TypeDef(_),
+        ) => true,
         // Between imports and exports
         (WorldItem::Import(_), WorldItem::Export(_)) => true,
         (WorldItem::Export(_), WorldItem::Import(_)) => true,
@@ -1080,8 +1086,14 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("// File header comment"), "Header comment missing");
-        assert!(output.contains("// This is a comment about the function"), "Function comment missing");
+        assert!(
+            output.contains("// File header comment"),
+            "Header comment missing"
+        );
+        assert!(
+            output.contains("// This is a comment about the function"),
+            "Function comment missing"
+        );
     }
 
     #[test]
@@ -1093,8 +1105,14 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("/* Block comment at top */"), "Top block comment missing");
-        assert!(output.contains("/* Inline block comment */"), "Inline block comment missing");
+        assert!(
+            output.contains("/* Block comment at top */"),
+            "Top block comment missing"
+        );
+        assert!(
+            output.contains("/* Inline block comment */"),
+            "Inline block comment missing"
+        );
     }
 
     #[test]
@@ -1110,7 +1128,10 @@ interface api {
 "#;
         let output = format_with_comments_str(input);
         assert!(output.contains("// User's unique ID"), "ID comment missing");
-        assert!(output.contains("// User's display name"), "Name comment missing");
+        assert!(
+            output.contains("// User's display name"),
+            "Name comment missing"
+        );
     }
 
     #[test]
@@ -1125,8 +1146,14 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("// Request is waiting"), "Pending comment missing");
-        assert!(output.contains("// Request is being processed"), "Active comment missing");
+        assert!(
+            output.contains("// Request is waiting"),
+            "Pending comment missing"
+        );
+        assert!(
+            output.contains("// Request is being processed"),
+            "Active comment missing"
+        );
     }
 
     #[test]
@@ -1140,8 +1167,14 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("// Import the logging interface"), "Import comment missing");
-        assert!(output.contains("// Export the main function"), "Export comment missing");
+        assert!(
+            output.contains("// Import the logging interface"),
+            "Import comment missing"
+        );
+        assert!(
+            output.contains("// Export the main function"),
+            "Export comment missing"
+        );
     }
 
     #[test]
@@ -1157,7 +1190,10 @@ interface api {
 "#;
         let first = format_with_comments_str(input);
         let second = format_with_comments_str(&first);
-        assert_eq!(first, second, "Comment-preserving formatting should be idempotent");
+        assert_eq!(
+            first, second,
+            "Comment-preserving formatting should be idempotent"
+        );
     }
 
     #[test]
@@ -1170,8 +1206,14 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("id: u64, // User's unique ID"), "ID trailing comment missing");
-        assert!(output.contains("name: string, // Display name"), "Name trailing comment missing");
+        assert!(
+            output.contains("id: u64, // User's unique ID"),
+            "ID trailing comment missing"
+        );
+        assert!(
+            output.contains("name: string, // Display name"),
+            "Name trailing comment missing"
+        );
     }
 
     #[test]
@@ -1185,9 +1227,18 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("pending, // Waiting to start"), "Pending trailing comment missing");
-        assert!(output.contains("active, // Currently running"), "Active trailing comment missing");
-        assert!(output.contains("done, // Completed"), "Done trailing comment missing");
+        assert!(
+            output.contains("pending, // Waiting to start"),
+            "Pending trailing comment missing"
+        );
+        assert!(
+            output.contains("active, // Currently running"),
+            "Active trailing comment missing"
+        );
+        assert!(
+            output.contains("done, // Completed"),
+            "Done trailing comment missing"
+        );
     }
 
     #[test]
@@ -1198,8 +1249,14 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("; // Say hello"), "greet trailing comment missing");
-        assert!(output.contains("; // Say goodbye"), "goodbye trailing comment missing");
+        assert!(
+            output.contains("; // Say hello"),
+            "greet trailing comment missing"
+        );
+        assert!(
+            output.contains("; // Say goodbye"),
+            "goodbye trailing comment missing"
+        );
     }
 
     #[test]
@@ -1213,8 +1270,14 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("read, // Can read"), "read trailing comment missing");
-        assert!(output.contains("write, // Can write"), "write trailing comment missing");
+        assert!(
+            output.contains("read, // Can read"),
+            "read trailing comment missing"
+        );
+        assert!(
+            output.contains("write, // Can write"),
+            "write trailing comment missing"
+        );
     }
 
     #[test]
@@ -1227,8 +1290,14 @@ interface api {
 }
 "#;
         let output = format_with_comments_str(input);
-        assert!(output.contains("success(string), // Success case"), "success trailing comment missing");
-        assert!(output.contains("failure(u32), // Error code"), "failure trailing comment missing");
+        assert!(
+            output.contains("success(string), // Success case"),
+            "success trailing comment missing"
+        );
+        assert!(
+            output.contains("failure(u32), // Error code"),
+            "failure trailing comment missing"
+        );
     }
 
     #[test]
@@ -1244,11 +1313,23 @@ interface api {
 "#;
         let output = format_with_comments_str(input);
         // Leading comments
-        assert!(output.contains("// The user's unique identifier"), "ID leading comment missing");
-        assert!(output.contains("// The user's display name"), "Name leading comment missing");
+        assert!(
+            output.contains("// The user's unique identifier"),
+            "ID leading comment missing"
+        );
+        assert!(
+            output.contains("// The user's display name"),
+            "Name leading comment missing"
+        );
         // Trailing comments
-        assert!(output.contains("// Must be positive"), "ID trailing comment missing");
-        assert!(output.contains("// Cannot be empty"), "Name trailing comment missing");
+        assert!(
+            output.contains("// Must be positive"),
+            "ID trailing comment missing"
+        );
+        assert!(
+            output.contains("// Cannot be empty"),
+            "Name trailing comment missing"
+        );
     }
 
     #[test]
@@ -1262,6 +1343,9 @@ interface api {
 "#;
         let first = format_with_comments_str(input);
         let second = format_with_comments_str(&first);
-        assert_eq!(first, second, "Trailing comment formatting should be idempotent");
+        assert_eq!(
+            first, second,
+            "Trailing comment formatting should be idempotent"
+        );
     }
 }

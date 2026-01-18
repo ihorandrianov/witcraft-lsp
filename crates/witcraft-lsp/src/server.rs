@@ -1,5 +1,7 @@
 use crate::document::{DocumentStore, SharedDocumentStore};
-use crate::workspace::{CrossFileResolver, ResolveResult, SharedWorkspaceManager, UndefinedType, WorkspaceManager};
+use crate::workspace::{
+    CrossFileResolver, ResolveResult, SharedWorkspaceManager, UndefinedType, WorkspaceManager,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
@@ -7,7 +9,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::info;
 use witcraft_syntax::{
-    node_at, DefinitionKind, GlobalDefinition, NodeRef, PackageId, SyntaxKind, SymbolIndex,
+    DefinitionKind, GlobalDefinition, NodeRef, PackageId, SymbolIndex, SyntaxKind, node_at,
 };
 
 const SEMANTIC_TOKEN_TYPES: &[SemanticTokenType] = &[
@@ -42,11 +44,17 @@ impl WitLanguageServer {
         info!("on_change called for {}", uri);
 
         let diagnostics = self.documents.with_document_mut(uri, |doc| {
-            info!("Inside with_document_mut closure, doc version: {}", doc.version);
+            info!(
+                "Inside with_document_mut closure, doc version: {}",
+                doc.version
+            );
 
             // First pass: collect all diagnostic data (ranges and messages)
             let (parse_errors, undefined_types, duplicates, unused_imports) = {
-                info!("About to call parse(), content length: {}", doc.content.len());
+                info!(
+                    "About to call parse(), content length: {}",
+                    doc.content.len()
+                );
                 let parse = doc.parse();
                 info!("Parse completed");
                 let index = SymbolIndex::build(&parse.root);
@@ -55,8 +63,13 @@ impl WitLanguageServer {
                 info!("References: {}", index.references().len());
                 info!("Definitions: {}", index.definitions().len());
 
-                let package_id = parse.root.package.as_ref().map(PackageId::from_package_decl);
-                self.workspace.update_file_definitions(uri, &index, package_id.clone());
+                let package_id = parse
+                    .root
+                    .package
+                    .as_ref()
+                    .map(PackageId::from_package_decl);
+                self.workspace
+                    .update_file_definitions(uri, &index, package_id.clone());
 
                 let errors: Vec<_> = parse
                     .errors
@@ -186,8 +199,13 @@ impl WitLanguageServer {
                     info!("Indexing sibling file: {}", sibling_uri);
                     let parse_result = witcraft_syntax::parse(&content);
                     let index = SymbolIndex::build(&parse_result.root);
-                    let package_id = parse_result.root.package.as_ref().map(PackageId::from_package_decl);
-                    self.workspace.update_file_definitions(&sibling_uri, &index, package_id);
+                    let package_id = parse_result
+                        .root
+                        .package
+                        .as_ref()
+                        .map(PackageId::from_package_decl);
+                    self.workspace
+                        .update_file_definitions(&sibling_uri, &index, package_id);
                 }
             }
         }
@@ -204,9 +222,7 @@ impl LanguageServer for WitLanguageServer {
             .workspace_folders
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|f| {
-                f.uri.to_file_path().ok()
-            })
+            .filter_map(|f| f.uri.to_file_path().ok())
             .collect();
 
         if !folders.is_empty() {
@@ -256,9 +272,7 @@ impl LanguageServer for WitLanguageServer {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
-                        code_action_kinds: Some(vec![
-                            CodeActionKind::QUICKFIX,
-                        ]),
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
                         ..Default::default()
                     },
                 )),
@@ -297,8 +311,11 @@ impl LanguageServer for WitLanguageServer {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
-        self.documents
-            .open(uri.clone(), params.text_document.version, params.text_document.text);
+        self.documents.open(
+            uri.clone(),
+            params.text_document.version,
+            params.text_document.text,
+        );
 
         // Index sibling .wit files for cross-file resolution
         self.index_sibling_files(&uri);
@@ -308,10 +325,14 @@ impl LanguageServer for WitLanguageServer {
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
-        info!("did_change for {}, version {}", uri, params.text_document.version);
+        info!(
+            "did_change for {}, version {}",
+            uri, params.text_document.version
+        );
         if let Some(change) = params.content_changes.into_iter().next() {
             info!("Updating document, content length: {}", change.text.len());
-            let updated = self.documents
+            let updated = self
+                .documents
                 .update(&uri, params.text_document.version, change.text);
             info!("Document update result: {}", updated);
             self.on_change(&uri).await;
@@ -333,7 +354,11 @@ impl LanguageServer for WitLanguageServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let position = params.text_document_position_params.position;
 
         // First try local resolution
@@ -364,7 +389,11 @@ impl LanguageServer for WitLanguageServer {
             if let Some(def) = index.find_definition(&name) {
                 return Some((
                     Location::new(
-                        params.text_document_position_params.text_document.uri.clone(),
+                        params
+                            .text_document_position_params
+                            .text_document
+                            .uri
+                            .clone(),
                         doc.range_to_lsp(def.name_range),
                     ),
                     true, // found locally
@@ -373,10 +402,7 @@ impl LanguageServer for WitLanguageServer {
 
             // Return name for cross-file lookup
             Some((
-                Location::new(
-                    Url::parse("file:///placeholder").unwrap(),
-                    Range::default(),
-                ),
+                Location::new(Url::parse("file:///placeholder").unwrap(), Range::default()),
                 false, // need cross-file lookup
             ))
         });
@@ -419,14 +445,17 @@ impl LanguageServer for WitLanguageServer {
                     let target_uri = Url::parse(&global_def.uri).ok()?;
 
                     // Try to get the target document's line index for proper range conversion
-                    if let Some(target_range) = self.documents.with_document(&global_def.uri, |target_doc| {
-                        target_doc.range_to_lsp(global_def.name_range)
-                    }) {
+                    if let Some(target_range) =
+                        self.documents.with_document(&global_def.uri, |target_doc| {
+                            target_doc.range_to_lsp(global_def.name_range)
+                        })
+                    {
                         Some(Location::new(target_uri, target_range))
                     } else {
                         // Fallback: use raw byte offsets converted to Position
                         // This is approximate but better than nothing
-                        let start = witcraft_syntax::Position::new(0, global_def.name_range.start());
+                        let start =
+                            witcraft_syntax::Position::new(0, global_def.name_range.start());
                         let end = witcraft_syntax::Position::new(0, global_def.name_range.end());
                         Some(Location::new(
                             target_uri,
@@ -448,7 +477,11 @@ impl LanguageServer for WitLanguageServer {
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let position = params.text_document_position_params.position;
 
         let result = self.documents.with_document_mut(&uri, |doc| {
@@ -472,12 +505,10 @@ impl LanguageServer for WitLanguageServer {
                 let resolver = CrossFileResolver::new(&self.workspace);
                 match resolver.resolve_type(&uri, name, &index) {
                     ResolveResult::Found(global_def) => Some(format_global_definition(&global_def)),
-                    ResolveResult::Imported(import) => {
-                        Some(format!(
-                            "```wit\n{}\n```\n\n*Imported from `{}`*",
-                            import.original_name, import.from_interface
-                        ))
-                    }
+                    ResolveResult::Imported(import) => Some(format!(
+                        "```wit\n{}\n```\n\n*Imported from `{}`*",
+                        import.original_name, import.from_interface
+                    )),
                     ResolveResult::Builtin => {
                         Some(format!("```wit\n{}\n```\n\n*Builtin type*", name))
                     }
@@ -560,32 +591,35 @@ impl LanguageServer for WitLanguageServer {
         let include_declaration = params.context.include_declaration;
 
         // First get the symbol name from the current position
-        let name = self.documents.with_document_mut(&uri, |doc| {
-            let offset = doc.position_to_offset(witcraft_syntax::Position::new(
-                position.line,
-                position.character,
-            ))?;
+        let name = self
+            .documents
+            .with_document_mut(&uri, |doc| {
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(
+                    position.line,
+                    position.character,
+                ))?;
 
-            let parse = doc.parse();
-            let node = node_at(&parse.root, offset)?;
+                let parse = doc.parse();
+                let node = node_at(&parse.root, offset)?;
 
-            let name = match node {
-                NodeRef::NamedType(named) => named.name.name.to_string(),
-                NodeRef::Ident(ident) => ident.name.to_string(),
-                NodeRef::Interface(iface) => iface.name.name.to_string(),
-                NodeRef::World(world) => world.name.name.to_string(),
-                NodeRef::Func(func) => func.name.name.to_string(),
-                NodeRef::Record(rec) => rec.name.name.to_string(),
-                NodeRef::Variant(var) => var.name.name.to_string(),
-                NodeRef::Enum(e) => e.name.name.to_string(),
-                NodeRef::Flags(f) => f.name.name.to_string(),
-                NodeRef::Resource(res) => res.name.name.to_string(),
-                NodeRef::TypeAlias(alias) => alias.name.name.to_string(),
-                _ => return None,
-            };
+                let name = match node {
+                    NodeRef::NamedType(named) => named.name.name.to_string(),
+                    NodeRef::Ident(ident) => ident.name.to_string(),
+                    NodeRef::Interface(iface) => iface.name.name.to_string(),
+                    NodeRef::World(world) => world.name.name.to_string(),
+                    NodeRef::Func(func) => func.name.name.to_string(),
+                    NodeRef::Record(rec) => rec.name.name.to_string(),
+                    NodeRef::Variant(var) => var.name.name.to_string(),
+                    NodeRef::Enum(e) => e.name.name.to_string(),
+                    NodeRef::Flags(f) => f.name.name.to_string(),
+                    NodeRef::Resource(res) => res.name.name.to_string(),
+                    NodeRef::TypeAlias(alias) => alias.name.name.to_string(),
+                    _ => return None,
+                };
 
-            Some(name)
-        }).flatten();
+                Some(name)
+            })
+            .flatten();
 
         let Some(name) = name else {
             return Ok(None);
@@ -603,37 +637,41 @@ impl LanguageServer for WitLanguageServer {
 
         // Search in each file
         for file_uri in &files_to_search {
-            if let Some(file_locations) = self.documents.with_document_mut(file_uri, |doc| {
-                let parse = doc.parse();
-                let index = SymbolIndex::build(&parse.root);
-                let mut file_locs = Vec::new();
+            if let Some(file_locations) = self
+                .documents
+                .with_document_mut(file_uri, |doc| {
+                    let parse = doc.parse();
+                    let index = SymbolIndex::build(&parse.root);
+                    let mut file_locs = Vec::new();
 
-                // Include declaration if requested
-                if include_declaration {
-                    if let Some(def) = index.find_definition(&name) {
-                        file_locs.push(Location::new(
-                            Url::parse(file_uri).unwrap(),
-                            doc.range_to_lsp(def.name_range),
-                        ));
+                    // Include declaration if requested
+                    if include_declaration {
+                        if let Some(def) = index.find_definition(&name) {
+                            file_locs.push(Location::new(
+                                Url::parse(file_uri).unwrap(),
+                                doc.range_to_lsp(def.name_range),
+                            ));
+                        }
                     }
-                }
 
-                // Find all references
-                for reference in index.references() {
-                    if &*reference.name == name {
-                        file_locs.push(Location::new(
-                            Url::parse(file_uri).unwrap(),
-                            doc.range_to_lsp(reference.range),
-                        ));
+                    // Find all references
+                    for reference in index.references() {
+                        if &*reference.name == name {
+                            file_locs.push(Location::new(
+                                Url::parse(file_uri).unwrap(),
+                                doc.range_to_lsp(reference.range),
+                            ));
+                        }
                     }
-                }
 
-                if file_locs.is_empty() {
-                    None
-                } else {
-                    Some(file_locs)
-                }
-            }).flatten() {
+                    if file_locs.is_empty() {
+                        None
+                    } else {
+                        Some(file_locs)
+                    }
+                })
+                .flatten()
+            {
                 locations.extend(file_locations);
             }
         }
@@ -711,10 +749,7 @@ impl LanguageServer for WitLanguageServer {
         Ok(result.map(SemanticTokensResult::Tokens))
     }
 
-    async fn completion(
-        &self,
-        params: CompletionParams,
-    ) -> Result<Option<CompletionResponse>> {
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.to_string();
         let position = params.text_document_position.position;
 
@@ -916,10 +951,7 @@ impl LanguageServer for WitLanguageServer {
         }
     }
 
-    async fn code_action(
-        &self,
-        params: CodeActionParams,
-    ) -> Result<Option<CodeActionResponse>> {
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = params.text_document.uri.to_string();
         let _range = params.range;
 
@@ -957,14 +989,18 @@ impl LanguageServer for WitLanguageServer {
         for diag in &params.context.diagnostics {
             // Handle "unused import" diagnostics
             if diag.message.starts_with("unused import") {
-                if let Some(action) = self.make_remove_import_action(&uri, diag, &index, &line_index) {
+                if let Some(action) =
+                    self.make_remove_import_action(&uri, diag, &index, &line_index)
+                {
                     actions.push(action);
                 }
             }
 
             // Handle "undefined type" diagnostics
             if diag.message.starts_with("undefined type") {
-                if let Some(action) = self.make_add_import_action(&uri, diag, &index, first_item_start, &line_index) {
+                if let Some(action) =
+                    self.make_add_import_action(&uri, diag, &index, first_item_start, &line_index)
+                {
                     actions.push(action);
                 }
             }
@@ -1039,31 +1075,34 @@ impl LanguageServer for WitLanguageServer {
         let new_name = params.new_name;
 
         // First, find the symbol at the position
-        let symbol_name = self.documents.with_document_mut(&uri, |doc| {
-            let offset = doc.position_to_offset(witcraft_syntax::Position::new(
-                position.line,
-                position.character,
-            ))?;
+        let symbol_name = self
+            .documents
+            .with_document_mut(&uri, |doc| {
+                let offset = doc.position_to_offset(witcraft_syntax::Position::new(
+                    position.line,
+                    position.character,
+                ))?;
 
-            let parse = doc.parse();
-            let node = node_at(&parse.root, offset)?;
+                let parse = doc.parse();
+                let node = node_at(&parse.root, offset)?;
 
-            // Get the symbol name
-            match node {
-                NodeRef::Ident(ident) => Some(ident.name.to_string()),
-                NodeRef::Interface(iface) => Some(iface.name.name.to_string()),
-                NodeRef::World(world) => Some(world.name.name.to_string()),
-                NodeRef::Record(rec) => Some(rec.name.name.to_string()),
-                NodeRef::Variant(var) => Some(var.name.name.to_string()),
-                NodeRef::Enum(e) => Some(e.name.name.to_string()),
-                NodeRef::Flags(f) => Some(f.name.name.to_string()),
-                NodeRef::Resource(res) => Some(res.name.name.to_string()),
-                NodeRef::TypeAlias(alias) => Some(alias.name.name.to_string()),
-                NodeRef::Func(func) => Some(func.name.name.to_string()),
-                NodeRef::NamedType(named) => Some(named.name.name.to_string()),
-                _ => None,
-            }
-        }).flatten();
+                // Get the symbol name
+                match node {
+                    NodeRef::Ident(ident) => Some(ident.name.to_string()),
+                    NodeRef::Interface(iface) => Some(iface.name.name.to_string()),
+                    NodeRef::World(world) => Some(world.name.name.to_string()),
+                    NodeRef::Record(rec) => Some(rec.name.name.to_string()),
+                    NodeRef::Variant(var) => Some(var.name.name.to_string()),
+                    NodeRef::Enum(e) => Some(e.name.name.to_string()),
+                    NodeRef::Flags(f) => Some(f.name.name.to_string()),
+                    NodeRef::Resource(res) => Some(res.name.name.to_string()),
+                    NodeRef::TypeAlias(alias) => Some(alias.name.name.to_string()),
+                    NodeRef::Func(func) => Some(func.name.name.to_string()),
+                    NodeRef::NamedType(named) => Some(named.name.name.to_string()),
+                    _ => None,
+                }
+            })
+            .flatten();
 
         let Some(old_name) = symbol_name else {
             return Ok(None);
@@ -1077,66 +1116,68 @@ impl LanguageServer for WitLanguageServer {
             package_files
         };
 
-        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> = std::collections::HashMap::new();
+        let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+            std::collections::HashMap::new();
 
         // Search in each file for occurrences
         for file_uri in &files_to_search {
-            let file_edits = self.documents.with_document_mut(file_uri, |doc| {
-                let parse = doc.parse();
-                let index = SymbolIndex::build(&parse.root);
-                let mut edits = Vec::new();
+            let file_edits = self
+                .documents
+                .with_document_mut(file_uri, |doc| {
+                    let parse = doc.parse();
+                    let index = SymbolIndex::build(&parse.root);
+                    let mut edits = Vec::new();
 
-                // Find definition in this file
-                if let Some(def) = index.find_definition(&old_name) {
-                    edits.push(TextEdit {
-                        range: doc.range_to_lsp(def.name_range),
-                        new_text: new_name.clone(),
-                    });
-                }
-
-                // Find all references in this file
-                for reference in index.references() {
-                    if &*reference.name == old_name {
+                    // Find definition in this file
+                    if let Some(def) = index.find_definition(&old_name) {
                         edits.push(TextEdit {
-                            range: doc.range_to_lsp(reference.range),
+                            range: doc.range_to_lsp(def.name_range),
                             new_text: new_name.clone(),
                         });
                     }
-                }
 
-                // Find imports that reference this name
-                for import in index.imports() {
-                    if &*import.original_name == old_name {
-                        // Rename the original name in the import statement
-                        // For `use iface.{old-name as alias}`, we rename `old-name`
-                        edits.push(TextEdit {
-                            range: doc.range_to_lsp(import.original_name_range),
-                            new_text: new_name.clone(),
-                        });
-
-                        // If there's no alias, also update usages (they use the original name)
-                        // If there IS an alias, usages use the alias so we don't touch them
-                        if &*import.local_name == old_name {
-                            // No alias - local_name equals original_name
-                            // References using this name will be caught by the references loop above
+                    // Find all references in this file
+                    for reference in index.references() {
+                        if &*reference.name == old_name {
+                            edits.push(TextEdit {
+                                range: doc.range_to_lsp(reference.range),
+                                new_text: new_name.clone(),
+                            });
                         }
-                    } else if &*import.local_name == old_name && &*import.original_name != old_name {
-                        // The import has an alias that matches old_name
-                        // e.g., `use iface.{something as old-name}`
-                        // Rename the alias
-                        edits.push(TextEdit {
-                            range: doc.range_to_lsp(import.range),
-                            new_text: new_name.clone(),
-                        });
                     }
-                }
 
-                if edits.is_empty() {
-                    None
-                } else {
-                    Some(edits)
-                }
-            }).flatten();
+                    // Find imports that reference this name
+                    for import in index.imports() {
+                        if &*import.original_name == old_name {
+                            // Rename the original name in the import statement
+                            // For `use iface.{old-name as alias}`, we rename `old-name`
+                            edits.push(TextEdit {
+                                range: doc.range_to_lsp(import.original_name_range),
+                                new_text: new_name.clone(),
+                            });
+
+                            // If there's no alias, also update usages (they use the original name)
+                            // If there IS an alias, usages use the alias so we don't touch them
+                            if &*import.local_name == old_name {
+                                // No alias - local_name equals original_name
+                                // References using this name will be caught by the references loop above
+                            }
+                        } else if &*import.local_name == old_name
+                            && &*import.original_name != old_name
+                        {
+                            // The import has an alias that matches old_name
+                            // e.g., `use iface.{something as old-name}`
+                            // Rename the alias
+                            edits.push(TextEdit {
+                                range: doc.range_to_lsp(import.range),
+                                new_text: new_name.clone(),
+                            });
+                        }
+                    }
+
+                    if edits.is_empty() { None } else { Some(edits) }
+                })
+                .flatten();
 
             if let Some(edits) = file_edits {
                 if let Ok(url) = Url::parse(file_uri) {
@@ -1191,17 +1232,20 @@ impl LanguageServer for WitLanguageServer {
                 };
 
                 // Try to get proper LSP range from the document
-                let location = if let Some(range) = self.documents.with_document(&def.uri, |doc| {
-                    doc.range_to_lsp(def.name_range)
-                }) {
+                let location = if let Some(range) = self
+                    .documents
+                    .with_document(&def.uri, |doc| doc.range_to_lsp(def.name_range))
+                {
                     Location::new(
-                        Url::parse(&def.uri).unwrap_or_else(|_| Url::parse("file:///unknown").unwrap()),
+                        Url::parse(&def.uri)
+                            .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap()),
                         range,
                     )
                 } else {
                     // Document not open - use approximate range
                     Location::new(
-                        Url::parse(&def.uri).unwrap_or_else(|_| Url::parse("file:///unknown").unwrap()),
+                        Url::parse(&def.uri)
+                            .unwrap_or_else(|_| Url::parse("file:///unknown").unwrap()),
                         Range::default(),
                     )
                 };
@@ -1228,10 +1272,7 @@ impl LanguageServer for WitLanguageServer {
         }
     }
 
-    async fn formatting(
-        &self,
-        params: DocumentFormattingParams,
-    ) -> Result<Option<Vec<TextEdit>>> {
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document.uri.to_string();
 
         let result = self.documents.with_document_mut(&uri, |doc| {
@@ -1265,11 +1306,12 @@ impl LanguageServer for WitLanguageServer {
         Ok(result.flatten())
     }
 
-    async fn signature_help(
-        &self,
-        params: SignatureHelpParams,
-    ) -> Result<Option<SignatureHelp>> {
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let position = params.text_document_position_params.position;
 
         let result = self.documents.with_document_mut(&uri, |doc| {
@@ -1287,10 +1329,7 @@ impl LanguageServer for WitLanguageServer {
         Ok(result.flatten())
     }
 
-    async fn folding_range(
-        &self,
-        params: FoldingRangeParams,
-    ) -> Result<Option<Vec<FoldingRange>>> {
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let uri = params.text_document.uri.to_string();
 
         let ranges = self.documents.with_document_mut(&uri, |doc| {
@@ -1350,10 +1389,7 @@ impl LanguageServer for WitLanguageServer {
         }
     }
 
-    async fn inlay_hint(
-        &self,
-        params: InlayHintParams,
-    ) -> Result<Option<Vec<InlayHint>>> {
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri.to_string();
 
         let hints = self.documents.with_document_mut(&uri, |doc| {
@@ -1371,7 +1407,11 @@ impl LanguageServer for WitLanguageServer {
         &self,
         params: DocumentHighlightParams,
     ) -> Result<Option<Vec<DocumentHighlight>>> {
-        let uri = params.text_document_position_params.text_document.uri.to_string();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
         let position = params.text_document_position_params.position;
 
         let highlights = self.documents.with_document_mut(&uri, |doc| {
@@ -1484,7 +1524,8 @@ impl WitLanguageServer {
         line_index: &witcraft_syntax::LineIndex,
     ) -> Option<CodeActionOrCommand> {
         // Extract the import name from the diagnostic message
-        let name = diag.message
+        let name = diag
+            .message
             .strip_prefix("unused import `")?
             .strip_suffix('`')?;
 
@@ -1492,7 +1533,8 @@ impl WitLanguageServer {
         let import = index.find_import(name)?;
 
         // Count how many imports share the same use statement
-        let siblings_count = index.imports()
+        let siblings_count = index
+            .imports()
             .iter()
             .filter(|i| i.use_statement_range == import.use_statement_range)
             .count();
@@ -1552,7 +1594,8 @@ impl WitLanguageServer {
         line_index: &witcraft_syntax::LineIndex,
     ) -> Option<CodeActionOrCommand> {
         // Extract the type name from the diagnostic message
-        let type_name = diag.message
+        let type_name = diag
+            .message
             .strip_prefix("undefined type `")?
             .strip_suffix('`')?;
 
@@ -1563,7 +1606,8 @@ impl WitLanguageServer {
         let interface_name = global_def.parent.as_ref()?;
 
         // Check if we already have a use statement for this interface
-        let existing_use = index.imports()
+        let existing_use = index
+            .imports()
             .iter()
             .find(|i| i.from_interface == *interface_name);
 
@@ -1578,7 +1622,10 @@ impl WitLanguageServer {
                 line: pos.line,
                 character: pos.column,
             };
-            (insert_position, format!("\n    use {}.{{{}}};", interface_name, type_name))
+            (
+                insert_position,
+                format!("\n    use {}.{{{}}};", interface_name, type_name),
+            )
         } else {
             // Create a new use statement at the start of the interface
             let insert_offset = first_item_start.unwrap_or(0);
@@ -1587,7 +1634,10 @@ impl WitLanguageServer {
                 line: pos.line,
                 character: pos.column,
             };
-            (insert_position, format!("\n    use {}.{{{}}};", interface_name, type_name))
+            (
+                insert_position,
+                format!("\n    use {}.{{{}}};", interface_name, type_name),
+            )
         };
 
         // Create the text edit
@@ -1615,7 +1665,10 @@ impl WitLanguageServer {
     }
 }
 
-fn build_interface_symbols<F>(iface: &witcraft_syntax::ast::InterfaceDecl, range_to_lsp: &F) -> Vec<DocumentSymbol>
+fn build_interface_symbols<F>(
+    iface: &witcraft_syntax::ast::InterfaceDecl,
+    range_to_lsp: &F,
+) -> Vec<DocumentSymbol>
 where
     F: Fn(witcraft_syntax::TextRange) -> Range,
 {
@@ -1661,7 +1714,10 @@ where
     children
 }
 
-fn build_world_symbols<F>(world: &witcraft_syntax::ast::WorldDecl, range_to_lsp: &F) -> Vec<DocumentSymbol>
+fn build_world_symbols<F>(
+    world: &witcraft_syntax::ast::WorldDecl,
+    range_to_lsp: &F,
+) -> Vec<DocumentSymbol>
 where
     F: Fn(witcraft_syntax::TextRange) -> Range,
 {
@@ -1733,7 +1789,10 @@ where
     children
 }
 
-fn build_typedef_symbol<F>(typedef: &witcraft_syntax::ast::TypeDef, range_to_lsp: &F) -> Option<DocumentSymbol>
+fn build_typedef_symbol<F>(
+    typedef: &witcraft_syntax::ast::TypeDef,
+    range_to_lsp: &F,
+) -> Option<DocumentSymbol>
 where
     F: Fn(witcraft_syntax::TextRange) -> Range,
 {
@@ -2146,32 +2205,26 @@ fn format_type(ty: &witcraft_syntax::Type) -> String {
         witcraft_syntax::Type::Primitive(p) => format!("{:?}", p.kind).to_lowercase(),
         witcraft_syntax::Type::List(list) => format!("list<{}>", format_type(&list.element)),
         witcraft_syntax::Type::Option(opt) => format!("option<{}>", format_type(&opt.inner)),
-        witcraft_syntax::Type::Result(res) => {
-            match (&res.ok, &res.err) {
-                (Some(ok), Some(err)) => format!("result<{}, {}>", format_type(ok), format_type(err)),
-                (Some(ok), None) => format!("result<{}>", format_type(ok)),
-                (None, Some(err)) => format!("result<_, {}>", format_type(err)),
-                (None, None) => "result".to_string(),
-            }
-        }
+        witcraft_syntax::Type::Result(res) => match (&res.ok, &res.err) {
+            (Some(ok), Some(err)) => format!("result<{}, {}>", format_type(ok), format_type(err)),
+            (Some(ok), None) => format!("result<{}>", format_type(ok)),
+            (None, Some(err)) => format!("result<_, {}>", format_type(err)),
+            (None, None) => "result".to_string(),
+        },
         witcraft_syntax::Type::Tuple(tuple) => {
             let elems: Vec<_> = tuple.elements.iter().map(format_type).collect();
             format!("tuple<{}>", elems.join(", "))
         }
         witcraft_syntax::Type::Borrow(b) => format!("borrow<{}>", b.resource.name),
         witcraft_syntax::Type::Own(o) => format!("own<{}>", o.resource.name),
-        witcraft_syntax::Type::Future(f) => {
-            match &f.inner {
-                Some(inner) => format!("future<{}>", format_type(inner)),
-                None => "future".to_string(),
-            }
-        }
-        witcraft_syntax::Type::Stream(s) => {
-            match &s.inner {
-                Some(inner) => format!("stream<{}>", format_type(inner)),
-                None => "stream".to_string(),
-            }
-        }
+        witcraft_syntax::Type::Future(f) => match &f.inner {
+            Some(inner) => format!("future<{}>", format_type(inner)),
+            None => "future".to_string(),
+        },
+        witcraft_syntax::Type::Stream(s) => match &s.inner {
+            Some(inner) => format!("stream<{}>", format_type(inner)),
+            None => "stream".to_string(),
+        },
     }
 }
 
@@ -2649,8 +2702,14 @@ interface internal {
                     let start = line_index.position(r.start());
                     let end = line_index.position(r.end());
                     Range {
-                        start: Position { line: start.line, character: start.column },
-                        end: Position { line: end.line, character: end.column },
+                        start: Position {
+                            line: start.line,
+                            character: start.column,
+                        },
+                        end: Position {
+                            line: end.line,
+                            character: end.column,
+                        },
                     }
                 };
 
@@ -2725,7 +2784,8 @@ interface internal {}"#;
         let store = make_store_with_doc(content);
         store
             .with_document_mut("file:///test.wit", |doc| {
-                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
+                let offset =
+                    doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
                 let parse = doc.parse().clone();
                 let index = witcraft_syntax::SymbolIndex::build(&parse.root);
 
@@ -2931,7 +2991,7 @@ interface internal {}"#;
 
     #[test]
     fn diagnostics_parse_error() {
-        let content = "interface api {";  // missing closing brace
+        let content = "interface api {"; // missing closing brace
         let diagnostics = get_diagnostics(content);
         assert!(!diagnostics.is_empty());
     }
@@ -2942,7 +3002,11 @@ interface internal {}"#;
     get-user: func() -> unknown-type;
 }"#;
         let diagnostics = get_diagnostics(content);
-        assert!(diagnostics.iter().any(|d| d.contains("undefined") || d.contains("unknown-type")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("undefined") || d.contains("unknown-type"))
+        );
     }
 
     #[test]
@@ -2952,7 +3016,11 @@ interface internal {}"#;
 }"#;
         let diagnostics = get_diagnostics(content);
         // Should have no diagnostics for valid file
-        assert!(diagnostics.is_empty(), "Expected no diagnostics, got: {:?}", diagnostics);
+        assert!(
+            diagnostics.is_empty(),
+            "Expected no diagnostics, got: {:?}",
+            diagnostics
+        );
     }
 
     /// Returns the definition location (line, column) for a symbol at the given position
@@ -2960,7 +3028,8 @@ interface internal {}"#;
         let store = make_store_with_doc(content);
         store
             .with_document_mut("file:///test.wit", |doc| {
-                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
+                let offset =
+                    doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
                 let parse = doc.parse().clone();
                 let index = witcraft_syntax::SymbolIndex::build(&parse.root);
 
@@ -3028,7 +3097,10 @@ interface internal {}"#;
         let def_pos = goto_definition_at(content, 6, 12);
         assert!(def_pos.is_some(), "Should find definition");
         let (line, _col) = def_pos.unwrap();
-        assert_eq!(line, 1, "Definition should be on line 1 (record error-info)");
+        assert_eq!(
+            line, 1,
+            "Definition should be on line 1 (record error-info)"
+        );
     }
 
     #[test]
@@ -3038,7 +3110,10 @@ interface internal {}"#;
 }"#;
         // Click on "unknown-type" - should not find definition
         let def_pos = goto_definition_at(content, 1, 25);
-        assert!(def_pos.is_none(), "Should not find definition for undefined type");
+        assert!(
+            def_pos.is_none(),
+            "Should not find definition for undefined type"
+        );
     }
 
     /// Returns all reference locations (line, column) for a symbol at the given position
@@ -3046,7 +3121,8 @@ interface internal {}"#;
         let store = make_store_with_doc(content);
         store
             .with_document_mut("file:///test.wit", |doc| {
-                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
+                let offset =
+                    doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
                 let parse = doc.parse().clone();
                 let index = witcraft_syntax::SymbolIndex::build(&parse.root);
 
@@ -3144,7 +3220,8 @@ interface internal {}"#;
         let store = make_store_with_doc(content);
         store
             .with_document_mut("file:///test.wit", |doc| {
-                let offset = doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
+                let offset =
+                    doc.position_to_offset(witcraft_syntax::Position::new(line, character))?;
                 let parse = doc.parse().clone();
                 let index = witcraft_syntax::SymbolIndex::build(&parse.root);
 
@@ -3195,7 +3272,11 @@ interface internal {}"#;
 }"#;
         // Rename "user" - should find all locations to rename
         let locations = get_rename_locations(content, 1, 11);
-        assert_eq!(locations.len(), 4, "Should rename definition + 3 references");
+        assert_eq!(
+            locations.len(),
+            4,
+            "Should rename definition + 3 references"
+        );
     }
 
     #[test]
@@ -3220,7 +3301,11 @@ interface internal {}"#;
 }"#;
         // Rename "status"
         let locations = get_rename_locations(content, 1, 9);
-        assert_eq!(locations.len(), 3, "Should rename definition + 2 references");
+        assert_eq!(
+            locations.len(),
+            3,
+            "Should rename definition + 2 references"
+        );
     }
 
     #[test]
@@ -3290,7 +3375,10 @@ interface internal {}"#;
         let help = find_signature_context(content, content.len());
         assert!(help.is_some());
         let help = help.unwrap();
-        assert_eq!(help.signatures[0].label, "func(name: type, ...) -> return-type");
+        assert_eq!(
+            help.signatures[0].label,
+            "func(name: type, ...) -> return-type"
+        );
     }
 
     #[test]
@@ -3414,9 +3502,8 @@ interface internal {}"#;
 
     #[test]
     fn inlay_hint_multiple_aliases() {
-        let hints = get_inlay_hints(
-            "interface api { type a = u32; type b = string; type c = list<u8>; }",
-        );
+        let hints =
+            get_inlay_hints("interface api { type a = u32; type b = string; type c = list<u8>; }");
         assert_eq!(hints.len(), 3);
     }
 
@@ -3586,7 +3673,14 @@ interface internal {}"#;
         let content = "interface api { record foo { x: u32, } type bar = foo; }";
         let lenses = get_code_lenses(content);
         assert_eq!(lenses.len(), 1);
-        assert!(lenses[0].command.as_ref().unwrap().title.contains("1 reference"));
+        assert!(
+            lenses[0]
+                .command
+                .as_ref()
+                .unwrap()
+                .title
+                .contains("1 reference")
+        );
     }
 
     #[test]
@@ -3594,7 +3688,14 @@ interface internal {}"#;
         let content = "interface api { record foo { x: u32, } type a = foo; type b = foo; }";
         let lenses = get_code_lenses(content);
         assert_eq!(lenses.len(), 1);
-        assert!(lenses[0].command.as_ref().unwrap().title.contains("2 references"));
+        assert!(
+            lenses[0]
+                .command
+                .as_ref()
+                .unwrap()
+                .title
+                .contains("2 references")
+        );
     }
 
     #[test]
@@ -3609,6 +3710,13 @@ interface internal {}"#;
         let content = "interface api { record a { x: u32, } record b { y: a, } type c = a; }";
         let lenses = get_code_lenses(content);
         assert_eq!(lenses.len(), 1);
-        assert!(lenses[0].command.as_ref().unwrap().title.contains("2 references"));
+        assert!(
+            lenses[0]
+                .command
+                .as_ref()
+                .unwrap()
+                .title
+                .contains("2 references")
+        );
     }
 }

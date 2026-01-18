@@ -14,8 +14,8 @@ pub use index::{
     Reference, ReferenceKind, SymbolIndex, UnusedImport,
 };
 pub use kind::SyntaxKind;
-pub use lexer::{lex, lex_non_trivia, Lexer, Token};
-pub use lookup::{node_at, NodeRef};
+pub use lexer::{Lexer, Token, lex, lex_non_trivia};
+pub use lookup::{NodeRef, node_at};
 pub use parse::{ErrorKind, ParseError, ParseResult};
 pub use parser::parse;
 pub use text::{LineIndex, Position, TextRange};

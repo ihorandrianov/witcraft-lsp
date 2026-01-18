@@ -1,6 +1,6 @@
-use witcraft_lsp::WitLanguageServer;
 use tower_lsp::{LspService, Server};
 use tracing::info;
+use witcraft_lsp::WitLanguageServer;
 
 #[tokio::main]
 async fn main() {

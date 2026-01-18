@@ -136,7 +136,7 @@ impl PackageIndex {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use witcraft_syntax::{parse, Definition, TextRange};
+    use witcraft_syntax::{Definition, TextRange, parse};
 
     fn make_definition(name: &str, kind: DefinitionKind) -> Definition {
         Definition {

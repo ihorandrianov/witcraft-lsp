@@ -91,26 +91,38 @@ impl WorkspaceManager {
     }
 
     /// Get the package index for a file URI.
-    pub fn package_index_for_file(&self, uri: &str) -> Option<dashmap::mapref::one::Ref<'_, PathBuf, PackageIndex>> {
+    pub fn package_index_for_file(
+        &self,
+        uri: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, PathBuf, PackageIndex>> {
         let pkg_dir = self.file_to_package.get(uri)?;
         self.packages.get(pkg_dir.value())
     }
 
     /// Get a mutable reference to the package index for a file URI.
-    pub fn package_index_for_file_mut(&self, uri: &str) -> Option<dashmap::mapref::one::RefMut<'_, PathBuf, PackageIndex>> {
+    pub fn package_index_for_file_mut(
+        &self,
+        uri: &str,
+    ) -> Option<dashmap::mapref::one::RefMut<'_, PathBuf, PackageIndex>> {
         let pkg_dir = self.file_to_package.get(uri)?;
         self.packages.get_mut(pkg_dir.value())
     }
 
     /// Update definitions for a file from its symbol index.
-    pub fn update_file_definitions(&self, uri: &str, index: &SymbolIndex, package_id: Option<PackageId>) {
+    pub fn update_file_definitions(
+        &self,
+        uri: &str,
+        index: &SymbolIndex,
+        package_id: Option<PackageId>,
+    ) {
         // Ensure file is registered with a package
         if self.file_to_package.get(uri).is_none() {
             // Infer package directory from URI
             if let Some(path) = uri_to_path(uri) {
                 if let Some(parent) = path.parent() {
                     self.ensure_package_index(parent);
-                    self.file_to_package.insert(uri.to_string(), parent.to_path_buf());
+                    self.file_to_package
+                        .insert(uri.to_string(), parent.to_path_buf());
                     if let Some(mut pkg) = self.packages.get_mut(parent) {
                         pkg.add_file(uri.to_string());
                     }
@@ -147,7 +159,9 @@ impl WorkspaceManager {
 
     /// Find a definition by name across all files in the same package.
     pub fn find_definition(&self, uri: &str, name: &str) -> Option<GlobalDefinition> {
-        self.package_index_for_file(uri)?.find_definition(name).cloned()
+        self.package_index_for_file(uri)?
+            .find_definition(name)
+            .cloned()
     }
 
     /// Find all definitions with the given name in the package.

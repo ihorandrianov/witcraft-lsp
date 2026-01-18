@@ -1,4 +1,4 @@
-use crate::{ast::SourceFile, SyntaxKind, TextRange, Token};
+use crate::{SyntaxKind, TextRange, Token, ast::SourceFile};
 
 /// Result of parsing a WIT file.
 ///
@@ -79,7 +79,12 @@ impl ParseError {
         )
     }
 
-    pub fn expected_in_context(expected: &str, found: &str, context: &str, range: TextRange) -> Self {
+    pub fn expected_in_context(
+        expected: &str,
+        found: &str,
+        context: &str,
+        range: TextRange,
+    ) -> Self {
         Self::new(
             format!("expected {} in {}, found {}", expected, context, found),
             range,

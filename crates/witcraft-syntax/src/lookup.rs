@@ -1,5 +1,5 @@
-use crate::ast::*;
 use crate::TextRange;
+use crate::ast::*;
 
 /// A reference to an AST node found at a position.
 ///

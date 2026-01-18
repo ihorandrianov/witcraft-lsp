@@ -2,8 +2,8 @@
 //!
 //! Provides definition tracking and lookup for go-to-definition and other features.
 
-use crate::ast::*;
 use crate::TextRange;
+use crate::ast::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -658,7 +658,11 @@ mod tests {
         let index = SymbolIndex::build(&result.root);
 
         // Find the reference to `user` in the return type
-        let user_refs: Vec<_> = index.references().iter().filter(|r| &*r.name == "user").collect();
+        let user_refs: Vec<_> = index
+            .references()
+            .iter()
+            .filter(|r| &*r.name == "user")
+            .collect();
         assert_eq!(user_refs.len(), 1);
 
         let user_ref = user_refs[0];
@@ -700,7 +704,11 @@ interface api {
         assert!(index.find_definition("get-user").is_some());
 
         // Should have references to user (in post.author, response.success, api.get-user return)
-        let user_refs: Vec<_> = index.references().iter().filter(|r| &*r.name == "user").collect();
+        let user_refs: Vec<_> = index
+            .references()
+            .iter()
+            .filter(|r| &*r.name == "user")
+            .collect();
         assert_eq!(user_refs.len(), 3);
     }
 

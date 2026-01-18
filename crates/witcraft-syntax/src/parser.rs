@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lexer::{lex, Token};
+use crate::lexer::{Token, lex};
 use crate::parse::{ErrorKind, ParseError, ParseResult};
 use crate::{SyntaxKind, TextRange};
 use smallvec::smallvec;
@@ -40,7 +40,10 @@ impl<'a> Parser<'a> {
     }
 
     fn find_non_trivia(tokens: &[Token], start: usize) -> Option<Token> {
-        tokens[start..].iter().find(|t| !t.kind.is_trivia()).copied()
+        tokens[start..]
+            .iter()
+            .find(|t| !t.kind.is_trivia())
+            .copied()
     }
 
     fn current(&self) -> Token {
@@ -125,12 +128,18 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_closing(&mut self, close: SyntaxKind, construct: &str, opened_at: TextRange) -> Option<Token> {
+    fn expect_closing(
+        &mut self,
+        close: SyntaxKind,
+        construct: &str,
+        opened_at: TextRange,
+    ) -> Option<Token> {
         if self.at(close) {
             Some(self.bump())
         } else {
             let cur = self.current();
-            self.errors.push(ParseError::unclosed(construct, opened_at, cur.range));
+            self.errors
+                .push(ParseError::unclosed(construct, opened_at, cur.range));
             None
         }
     }
@@ -351,7 +360,17 @@ impl<'a> Parser<'a> {
     /// Grammar: `'package' ( id ':' )+ id ( '/' id )* ('@' valid-semver)?`
     ///
     /// Returns (namespace_segments, name, nested_segments, version, start_pos, docs)
-    fn parse_package_header(&mut self, docs: Option<DocComment>) -> (SmallVec2<Ident>, Ident, SmallVec2<Ident>, Option<Version>, u32, Option<DocComment>) {
+    fn parse_package_header(
+        &mut self,
+        docs: Option<DocComment>,
+    ) -> (
+        SmallVec2<Ident>,
+        Ident,
+        SmallVec2<Ident>,
+        Option<Version>,
+        u32,
+        Option<DocComment>,
+    ) {
         let start = self.bump().range.start();
 
         let mut segments: SmallVec2<Ident> = smallvec![];
@@ -370,12 +389,22 @@ impl<'a> Parser<'a> {
         loop {
             let ident = if self.at(SyntaxKind::Ident) {
                 self.parse_ident().unwrap()
-            } else if self.at(SyntaxKind::At) || self.at(SyntaxKind::Slash) || self.at(SyntaxKind::Semicolon) || self.at(SyntaxKind::LBrace) {
+            } else if self.at(SyntaxKind::At)
+                || self.at(SyntaxKind::Slash)
+                || self.at(SyntaxKind::Semicolon)
+                || self.at(SyntaxKind::LBrace)
+            {
                 self.error_expected("package name");
-                Ident::new("", TextRange::new(self.current().range.start(), self.current().range.start()))
+                Ident::new(
+                    "",
+                    TextRange::new(self.current().range.start(), self.current().range.start()),
+                )
             } else {
                 self.error_expected("package name (e.g., `http` in `wasi:http`)");
-                Ident::new("", TextRange::new(self.current().range.start(), self.current().range.start()))
+                Ident::new(
+                    "",
+                    TextRange::new(self.current().range.start(), self.current().range.start()),
+                )
             };
 
             if self.eat(SyntaxKind::Colon).is_some() {
@@ -415,7 +444,8 @@ impl<'a> Parser<'a> {
     fn parse_package_decl(&mut self, docs: Option<DocComment>) -> PackageDecl {
         let (namespace, name, nested, version, start, docs) = self.parse_package_header(docs);
 
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| self.current().range.start());
 
@@ -462,7 +492,8 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.expect(SyntaxKind::RBrace)
+        let end = self
+            .expect(SyntaxKind::RBrace)
             .map(|t| t.range.end())
             .unwrap_or_else(|| self.current().range.start());
 
@@ -510,9 +541,13 @@ impl<'a> Parser<'a> {
             major,
             minor,
             patch,
-            range: TextRange::new(start, self.tokens.get(self.pos.saturating_sub(1))
-                .map(|t| t.range.end())
-                .unwrap_or(start)),
+            range: TextRange::new(
+                start,
+                self.tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| t.range.end())
+                    .unwrap_or(start),
+            ),
         }
     }
 
@@ -530,9 +565,13 @@ impl<'a> Parser<'a> {
             major,
             minor,
             patch,
-            range: TextRange::new(start, self.tokens.get(self.pos.saturating_sub(1))
-                .map(|t| t.range.end())
-                .unwrap_or(start)),
+            range: TextRange::new(
+                start,
+                self.tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| t.range.end())
+                    .unwrap_or(start),
+            ),
         }
     }
 
@@ -549,7 +588,8 @@ impl<'a> Parser<'a> {
     fn parse_top_level_use(&mut self, docs: Option<DocComment>) -> TopLevelUse {
         let start = self.bump().range.start();
         let path = self.parse_use_path();
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| path.range.end());
 
@@ -563,21 +603,29 @@ impl<'a> Parser<'a> {
     fn parse_use_path(&mut self) -> UsePath {
         let start = self.current().range.start();
 
-        let first = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let first = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let (namespace, package, name) = if self.at(SyntaxKind::Colon) {
             self.bump();
-            let pkg = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+            let pkg = self
+                .parse_ident()
+                .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
             if self.at(SyntaxKind::Slash) {
                 self.bump();
-                let iface = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+                let iface = self
+                    .parse_ident()
+                    .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
                 (Some(first), Some(pkg), iface)
             } else {
                 (Some(first), None, pkg)
             }
         } else if self.at(SyntaxKind::Slash) {
             self.bump();
-            let iface = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+            let iface = self
+                .parse_ident()
+                .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
             (None, Some(first), iface)
         } else {
             (None, None, first)
@@ -589,7 +637,10 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let end = version.as_ref().map(|v| v.range.end()).unwrap_or(name.range.end());
+        let end = version
+            .as_ref()
+            .map(|v| v.range.end())
+            .unwrap_or(name.range.end());
 
         UsePath {
             namespace,
@@ -602,19 +653,25 @@ impl<'a> Parser<'a> {
 
     fn parse_item(&mut self, gates: Gates, docs: Option<DocComment>) -> Option<Item> {
         match self.current().kind {
-            SyntaxKind::InterfaceKw => Some(Item::Interface(self.parse_interface_decl(gates, docs))),
-            SyntaxKind::WorldKw => Some(Item::World(self.parse_world_decl(gates, docs))),
-            SyntaxKind::TypeKw | SyntaxKind::RecordKw | SyntaxKind::VariantKw |
-            SyntaxKind::EnumKw | SyntaxKind::FlagsKw | SyntaxKind::ResourceKw => {
-                Some(Item::TypeDef(self.parse_typedef(gates, docs)))
+            SyntaxKind::InterfaceKw => {
+                Some(Item::Interface(self.parse_interface_decl(gates, docs)))
             }
+            SyntaxKind::WorldKw => Some(Item::World(self.parse_world_decl(gates, docs))),
+            SyntaxKind::TypeKw
+            | SyntaxKind::RecordKw
+            | SyntaxKind::VariantKw
+            | SyntaxKind::EnumKw
+            | SyntaxKind::FlagsKw
+            | SyntaxKind::ResourceKw => Some(Item::TypeDef(self.parse_typedef(gates, docs))),
             _ => None,
         }
     }
 
     fn parse_interface_decl(&mut self, gates: Gates, docs: Option<DocComment>) -> InterfaceDecl {
         let start = self.bump().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let lbrace = self.expect(SyntaxKind::LBrace);
         let mut items = Vec::new();
@@ -637,7 +694,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RBrace, "interface", open.range)
         } else {
             self.expect(SyntaxKind::RBrace)
-        }.map(|t| t.range.end()).unwrap_or(start);
+        }
+        .map(|t| t.range.end())
+        .unwrap_or(start);
 
         InterfaceDecl {
             gates,
@@ -648,11 +707,19 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_interface_item(&mut self, gates: Gates, docs: Option<DocComment>) -> Option<InterfaceItem> {
+    fn parse_interface_item(
+        &mut self,
+        gates: Gates,
+        docs: Option<DocComment>,
+    ) -> Option<InterfaceItem> {
         match self.current().kind {
             SyntaxKind::UseKw => Some(InterfaceItem::Use(self.parse_interface_use(docs))),
-            SyntaxKind::TypeKw | SyntaxKind::RecordKw | SyntaxKind::VariantKw |
-            SyntaxKind::EnumKw | SyntaxKind::FlagsKw | SyntaxKind::ResourceKw => {
+            SyntaxKind::TypeKw
+            | SyntaxKind::RecordKw
+            | SyntaxKind::VariantKw
+            | SyntaxKind::EnumKw
+            | SyntaxKind::FlagsKw
+            | SyntaxKind::ResourceKw => {
                 Some(InterfaceItem::TypeDef(self.parse_typedef(gates, docs)))
             }
             SyntaxKind::Ident => Some(InterfaceItem::Func(self.parse_func_decl(gates, docs))),
@@ -679,7 +746,8 @@ impl<'a> Parser<'a> {
             self.expect(SyntaxKind::RBrace);
         }
 
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| self.current().range.start());
 
@@ -693,16 +761,24 @@ impl<'a> Parser<'a> {
 
     fn parse_use_name_item(&mut self) -> UseNameItem {
         let start = self.current().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let alias = if self.at(SyntaxKind::AsKw) {
             self.bump();
-            Some(self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start))))
+            Some(
+                self.parse_ident()
+                    .unwrap_or_else(|| Ident::new("", TextRange::new(start, start))),
+            )
         } else {
             None
         };
 
-        let end = alias.as_ref().map(|a| a.range.end()).unwrap_or(name.range.end());
+        let end = alias
+            .as_ref()
+            .map(|a| a.range.end())
+            .unwrap_or(name.range.end());
 
         UseNameItem {
             name,
@@ -713,7 +789,9 @@ impl<'a> Parser<'a> {
 
     fn parse_world_decl(&mut self, gates: Gates, docs: Option<DocComment>) -> WorldDecl {
         let start = self.bump().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let lbrace = self.expect(SyntaxKind::LBrace);
         let mut items = Vec::new();
@@ -734,7 +812,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RBrace, "world", open.range)
         } else {
             self.expect(SyntaxKind::RBrace)
-        }.map(|t| t.range.end()).unwrap_or(start);
+        }
+        .map(|t| t.range.end())
+        .unwrap_or(start);
 
         WorldDecl {
             gates,
@@ -751,10 +831,12 @@ impl<'a> Parser<'a> {
             SyntaxKind::ExportKw => Some(WorldItem::Export(self.parse_export_decl(docs))),
             SyntaxKind::IncludeKw => Some(WorldItem::Include(self.parse_include_decl(docs))),
             SyntaxKind::UseKw => Some(WorldItem::Use(self.parse_interface_use(docs))),
-            SyntaxKind::TypeKw | SyntaxKind::RecordKw | SyntaxKind::VariantKw |
-            SyntaxKind::EnumKw | SyntaxKind::FlagsKw | SyntaxKind::ResourceKw => {
-                Some(WorldItem::TypeDef(self.parse_typedef(gates, docs)))
-            }
+            SyntaxKind::TypeKw
+            | SyntaxKind::RecordKw
+            | SyntaxKind::VariantKw
+            | SyntaxKind::EnumKw
+            | SyntaxKind::FlagsKw
+            | SyntaxKind::ResourceKw => Some(WorldItem::TypeDef(self.parse_typedef(gates, docs))),
             _ => None,
         }
     }
@@ -762,11 +844,16 @@ impl<'a> Parser<'a> {
     fn parse_import_decl(&mut self, docs: Option<DocComment>) -> ImportDecl {
         let start = self.bump().range.start();
 
-        let first = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let first = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let (name, kind) = if self.at(SyntaxKind::Colon) {
             let after_colon = self.peek(1);
-            if after_colon.kind == SyntaxKind::FuncKw || after_colon.kind == SyntaxKind::InterfaceKw || after_colon.kind == SyntaxKind::AsyncKw {
+            if after_colon.kind == SyntaxKind::FuncKw
+                || after_colon.kind == SyntaxKind::InterfaceKw
+                || after_colon.kind == SyntaxKind::AsyncKw
+            {
                 self.bump();
                 (first, self.parse_extern_kind())
             } else {
@@ -789,7 +876,8 @@ impl<'a> Parser<'a> {
             (first, ExternKind::Path(path))
         };
 
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| self.current().range.start());
 
@@ -806,17 +894,23 @@ impl<'a> Parser<'a> {
 
         let (namespace, package, name) = if self.at(SyntaxKind::Colon) {
             self.bump();
-            let pkg = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+            let pkg = self
+                .parse_ident()
+                .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
             if self.at(SyntaxKind::Slash) {
                 self.bump();
-                let iface = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+                let iface = self
+                    .parse_ident()
+                    .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
                 (Some(first), Some(pkg), iface)
             } else {
                 (Some(first), None, pkg)
             }
         } else if self.at(SyntaxKind::Slash) {
             self.bump();
-            let iface = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+            let iface = self
+                .parse_ident()
+                .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
             (None, Some(first), iface)
         } else {
             (None, None, first)
@@ -828,7 +922,10 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let end = version.as_ref().map(|v| v.range.end()).unwrap_or(name.range.end());
+        let end = version
+            .as_ref()
+            .map(|v| v.range.end())
+            .unwrap_or(name.range.end());
 
         UsePath {
             namespace,
@@ -842,11 +939,16 @@ impl<'a> Parser<'a> {
     fn parse_export_decl(&mut self, docs: Option<DocComment>) -> ExportDecl {
         let start = self.bump().range.start();
 
-        let first = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let first = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let (name, kind) = if self.at(SyntaxKind::Colon) {
             let after_colon = self.peek(1);
-            if after_colon.kind == SyntaxKind::FuncKw || after_colon.kind == SyntaxKind::InterfaceKw || after_colon.kind == SyntaxKind::AsyncKw {
+            if after_colon.kind == SyntaxKind::FuncKw
+                || after_colon.kind == SyntaxKind::InterfaceKw
+                || after_colon.kind == SyntaxKind::AsyncKw
+            {
                 self.bump();
                 (first, self.parse_extern_kind())
             } else {
@@ -869,7 +971,8 @@ impl<'a> Parser<'a> {
             (first, ExternKind::Path(path))
         };
 
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| self.current().range.start());
 
@@ -904,9 +1007,7 @@ impl<'a> Parser<'a> {
             SyntaxKind::FuncKw | SyntaxKind::AsyncKw => {
                 ExternKind::Func(self.parse_func_signature())
             }
-            _ => {
-                ExternKind::Path(self.parse_use_path())
-            }
+            _ => ExternKind::Path(self.parse_use_path()),
         }
     }
 
@@ -932,7 +1033,8 @@ impl<'a> Parser<'a> {
             smallvec![]
         };
 
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| path.range.end());
 
@@ -946,12 +1048,14 @@ impl<'a> Parser<'a> {
 
     fn parse_include_name_item(&mut self) -> IncludeNameItem {
         let start = self.current().range.start();
-        let name = self.parse_ident()
+        let name = self
+            .parse_ident()
             .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         self.expect(SyntaxKind::AsKw);
 
-        let alias = self.parse_ident()
+        let alias = self
+            .parse_ident()
             .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let end = alias.range.end();
@@ -972,7 +1076,9 @@ impl<'a> Parser<'a> {
             SyntaxKind::FlagsKw => TypeDef::Flags(self.parse_flags(gates, docs)),
             SyntaxKind::ResourceKw => TypeDef::Resource(self.parse_resource(gates, docs)),
             _ => {
-                self.error_expected("type definition (type, record, variant, enum, flags, resource)");
+                self.error_expected(
+                    "type definition (type, record, variant, enum, flags, resource)",
+                );
                 let start = self.current().range.start();
                 TypeDef::Alias(TypeAlias {
                     gates,
@@ -990,10 +1096,13 @@ impl<'a> Parser<'a> {
 
     fn parse_type_alias(&mut self, gates: Gates, docs: Option<DocComment>) -> TypeAlias {
         let start = self.bump().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
         self.expect(SyntaxKind::Eq);
         let ty = self.parse_type();
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| ty.range().end());
 
@@ -1008,7 +1117,9 @@ impl<'a> Parser<'a> {
 
     fn parse_record(&mut self, gates: Gates, docs: Option<DocComment>) -> RecordDecl {
         let start = self.bump().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let lbrace = self.expect(SyntaxKind::LBrace);
         let mut fields: SmallVec8<RecordField> = smallvec![];
@@ -1025,7 +1136,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RBrace, "record", open.range)
         } else {
             self.expect(SyntaxKind::RBrace)
-        }.map(|t| t.range.end()).unwrap_or_else(|| name.range.end());
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| name.range.end());
 
         RecordDecl {
             gates,
@@ -1038,7 +1151,9 @@ impl<'a> Parser<'a> {
 
     fn parse_record_field(&mut self, docs: Option<DocComment>) -> RecordField {
         let start = self.current().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
         self.expect(SyntaxKind::Colon);
         let ty = self.parse_type();
 
@@ -1052,7 +1167,9 @@ impl<'a> Parser<'a> {
 
     fn parse_variant(&mut self, gates: Gates, docs: Option<DocComment>) -> VariantDecl {
         let start = self.bump().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let lbrace = self.expect(SyntaxKind::LBrace);
         let mut cases: SmallVec8<VariantCase> = smallvec![];
@@ -1069,7 +1186,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RBrace, "variant", open.range)
         } else {
             self.expect(SyntaxKind::RBrace)
-        }.map(|t| t.range.end()).unwrap_or_else(|| name.range.end());
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| name.range.end());
 
         VariantDecl {
             gates,
@@ -1082,7 +1201,9 @@ impl<'a> Parser<'a> {
 
     fn parse_variant_case(&mut self, docs: Option<DocComment>) -> VariantCase {
         let start = self.current().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let ty = if self.at(SyntaxKind::LParen) {
             self.bump();
@@ -1093,9 +1214,14 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let end = ty.as_ref().map(|_| self.tokens.get(self.pos.saturating_sub(1))
-            .map(|t| t.range.end())
-            .unwrap_or(name.range.end()))
+        let end = ty
+            .as_ref()
+            .map(|_| {
+                self.tokens
+                    .get(self.pos.saturating_sub(1))
+                    .map(|t| t.range.end())
+                    .unwrap_or(name.range.end())
+            })
             .unwrap_or(name.range.end());
 
         VariantCase {
@@ -1108,7 +1234,9 @@ impl<'a> Parser<'a> {
 
     fn parse_enum(&mut self, gates: Gates, docs: Option<DocComment>) -> EnumDecl {
         let start = self.bump().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let lbrace = self.expect(SyntaxKind::LBrace);
         let mut cases: SmallVec8<EnumCase> = smallvec![];
@@ -1116,7 +1244,9 @@ impl<'a> Parser<'a> {
         while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
             let docs = self.collect_doc_comment();
             let case_start = self.current().range.start();
-            let case_name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(case_start, case_start)));
+            let case_name = self
+                .parse_ident()
+                .unwrap_or_else(|| Ident::new("", TextRange::new(case_start, case_start)));
             cases.push(EnumCase {
                 docs,
                 name: case_name.clone(),
@@ -1131,7 +1261,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RBrace, "enum", open.range)
         } else {
             self.expect(SyntaxKind::RBrace)
-        }.map(|t| t.range.end()).unwrap_or_else(|| name.range.end());
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| name.range.end());
 
         EnumDecl {
             gates,
@@ -1144,7 +1276,9 @@ impl<'a> Parser<'a> {
 
     fn parse_flags(&mut self, gates: Gates, docs: Option<DocComment>) -> FlagsDecl {
         let start = self.bump().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let lbrace = self.expect(SyntaxKind::LBrace);
         let mut flags: SmallVec8<FlagCase> = smallvec![];
@@ -1152,7 +1286,9 @@ impl<'a> Parser<'a> {
         while !self.at(SyntaxKind::RBrace) && !self.at_eof() {
             let docs = self.collect_doc_comment();
             let flag_start = self.current().range.start();
-            let flag_name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(flag_start, flag_start)));
+            let flag_name = self
+                .parse_ident()
+                .unwrap_or_else(|| Ident::new("", TextRange::new(flag_start, flag_start)));
             flags.push(FlagCase {
                 docs,
                 name: flag_name.clone(),
@@ -1167,7 +1303,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RBrace, "flags", open.range)
         } else {
             self.expect(SyntaxKind::RBrace)
-        }.map(|t| t.range.end()).unwrap_or_else(|| name.range.end());
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| name.range.end());
 
         FlagsDecl {
             gates,
@@ -1180,7 +1318,9 @@ impl<'a> Parser<'a> {
 
     fn parse_resource(&mut self, gates: Gates, docs: Option<DocComment>) -> ResourceDecl {
         let start = self.bump().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
 
         let mut items = Vec::new();
 
@@ -1204,7 +1344,9 @@ impl<'a> Parser<'a> {
             self.expect(SyntaxKind::Semicolon);
         }
 
-        let end = self.tokens.get(self.pos.saturating_sub(1))
+        let end = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
             .map(|t| t.range.end())
             .unwrap_or(name.range.end());
 
@@ -1217,9 +1359,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_resource_item(&mut self, gates: Gates, docs: Option<DocComment>) -> Option<ResourceItem> {
+    fn parse_resource_item(
+        &mut self,
+        gates: Gates,
+        docs: Option<DocComment>,
+    ) -> Option<ResourceItem> {
         match self.current().kind {
-            SyntaxKind::ConstructorKw => Some(ResourceItem::Constructor(self.parse_constructor(gates, docs))),
+            SyntaxKind::ConstructorKw => Some(ResourceItem::Constructor(
+                self.parse_constructor(gates, docs),
+            )),
             SyntaxKind::Ident => {
                 let name = self.parse_ident()?;
                 let name_start = name.range.start();
@@ -1228,7 +1376,8 @@ impl<'a> Parser<'a> {
                 if self.at(SyntaxKind::StaticKw) {
                     self.bump();
                     let sig = self.parse_func_signature();
-                    let end = self.expect(SyntaxKind::Semicolon)
+                    let end = self
+                        .expect(SyntaxKind::Semicolon)
                         .map(|t| t.range.end())
                         .unwrap_or_else(|| sig.range.end());
                     Some(ResourceItem::Static(StaticDecl {
@@ -1240,7 +1389,8 @@ impl<'a> Parser<'a> {
                     }))
                 } else {
                     let sig = self.parse_func_signature();
-                    let end = self.expect(SyntaxKind::Semicolon)
+                    let end = self
+                        .expect(SyntaxKind::Semicolon)
                         .map(|t| t.range.end())
                         .unwrap_or_else(|| sig.range.end());
                     Some(ResourceItem::Method(MethodDecl {
@@ -1277,7 +1427,8 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| self.current().range.start());
 
@@ -1292,10 +1443,13 @@ impl<'a> Parser<'a> {
 
     fn parse_func_decl(&mut self, gates: Gates, docs: Option<DocComment>) -> FuncDecl {
         let start = self.current().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
         self.expect(SyntaxKind::Colon);
         let sig = self.parse_func_signature();
-        let end = self.expect(SyntaxKind::Semicolon)
+        let end = self
+            .expect(SyntaxKind::Semicolon)
             .map(|t| t.range.end())
             .unwrap_or_else(|| sig.range.end());
 
@@ -1331,13 +1485,20 @@ impl<'a> Parser<'a> {
                 break;
             }
             // Break if we hit a keyword or brace that indicates we've gone too far
-            if self.current().kind.is_keyword() || self.at(SyntaxKind::RBrace) || self.at(SyntaxKind::LBrace) {
+            if self.current().kind.is_keyword()
+                || self.at(SyntaxKind::RBrace)
+                || self.at(SyntaxKind::LBrace)
+            {
                 break;
             }
             params.push(self.parse_param());
             // After parsing a param, recover to , or ) or ; or } or keywords
-            while !self.at_any(&[SyntaxKind::Comma, SyntaxKind::RParen, SyntaxKind::Semicolon, SyntaxKind::RBrace])
-                && !self.at_eof()
+            while !self.at_any(&[
+                SyntaxKind::Comma,
+                SyntaxKind::RParen,
+                SyntaxKind::Semicolon,
+                SyntaxKind::RBrace,
+            ]) && !self.at_eof()
                 && !self.current().kind.is_keyword()
             {
                 self.bump();
@@ -1357,13 +1518,13 @@ impl<'a> Parser<'a> {
         };
 
         let end = match &results {
-            FuncResults::None => self.tokens.get(self.pos.saturating_sub(1))
+            FuncResults::None => self
+                .tokens
+                .get(self.pos.saturating_sub(1))
                 .map(|t| t.range.end())
                 .unwrap_or(start),
             FuncResults::Anon(ty) => ty.range().end(),
-            FuncResults::Named(params) => params.last()
-                .map(|p| p.range.end())
-                .unwrap_or(start),
+            FuncResults::Named(params) => params.last().map(|p| p.range.end()).unwrap_or(start),
         };
 
         FuncSignature {
@@ -1376,7 +1537,9 @@ impl<'a> Parser<'a> {
 
     fn parse_param(&mut self) -> Param {
         let start = self.current().range.start();
-        let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let name = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
         self.expect(SyntaxKind::Colon);
         let ty = self.parse_type();
 
@@ -1432,7 +1595,9 @@ impl<'a> Parser<'a> {
             SyntaxKind::StreamKw => self.parse_stream_type(),
 
             SyntaxKind::Ident => {
-                let name = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+                let name = self
+                    .parse_ident()
+                    .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
                 Type::Named(NamedType {
                     range: name.range,
                     name,
@@ -1466,7 +1631,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RAngle, "list<>", open_tok.range)
         } else {
             self.expect(SyntaxKind::RAngle)
-        }.map(|t| t.range.end()).unwrap_or_else(|| element.range().end());
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| element.range().end());
 
         Type::List(Box::new(ListType {
             element,
@@ -1482,7 +1649,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RAngle, "option<>", open_tok.range)
         } else {
             self.expect(SyntaxKind::RAngle)
-        }.map(|t| t.range.end()).unwrap_or_else(|| inner.range().end());
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| inner.range().end());
 
         Type::Option(Box::new(OptionType {
             inner,
@@ -1497,9 +1666,13 @@ impl<'a> Parser<'a> {
             return Type::Result(Box::new(ResultType {
                 ok: None,
                 err: None,
-                range: TextRange::new(start, self.tokens.get(self.pos.saturating_sub(1))
-                    .map(|t| t.range.end())
-                    .unwrap_or(start)),
+                range: TextRange::new(
+                    start,
+                    self.tokens
+                        .get(self.pos.saturating_sub(1))
+                        .map(|t| t.range.end())
+                        .unwrap_or(start),
+                ),
             }));
         }
 
@@ -1519,10 +1692,12 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let end = self.expect_closing(SyntaxKind::RAngle, "result<>", open_tok.range)
+        let end = self
+            .expect_closing(SyntaxKind::RAngle, "result<>", open_tok.range)
             .map(|t| t.range.end())
             .unwrap_or_else(|| {
-                err.as_ref().map(|e| e.range().end())
+                err.as_ref()
+                    .map(|e| e.range().end())
                     .or_else(|| ok.as_ref().map(|o| o.range().end()))
                     .unwrap_or(start)
             });
@@ -1550,9 +1725,9 @@ impl<'a> Parser<'a> {
             self.expect_closing(SyntaxKind::RAngle, "tuple<>", open_tok.range)
         } else {
             self.expect(SyntaxKind::RAngle)
-        }.map(|t| t.range.end()).unwrap_or_else(|| elements.last()
-            .map(|e| e.range().end())
-            .unwrap_or(start));
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| elements.last().map(|e| e.range().end()).unwrap_or(start));
 
         Type::Tuple(Box::new(TupleType {
             elements,
@@ -1563,12 +1738,16 @@ impl<'a> Parser<'a> {
     fn parse_borrow_type(&mut self) -> Type {
         let start = self.bump().range.start();
         let open = self.expect(SyntaxKind::LAngle);
-        let resource = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let resource = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
         let end = if let Some(open_tok) = open {
             self.expect_closing(SyntaxKind::RAngle, "borrow<>", open_tok.range)
         } else {
             self.expect(SyntaxKind::RAngle)
-        }.map(|t| t.range.end()).unwrap_or_else(|| resource.range.end());
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| resource.range.end());
 
         Type::Borrow(Box::new(HandleType {
             resource,
@@ -1579,12 +1758,16 @@ impl<'a> Parser<'a> {
     fn parse_own_type(&mut self) -> Type {
         let start = self.bump().range.start();
         let open = self.expect(SyntaxKind::LAngle);
-        let resource = self.parse_ident().unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
+        let resource = self
+            .parse_ident()
+            .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
         let end = if let Some(open_tok) = open {
             self.expect_closing(SyntaxKind::RAngle, "own<>", open_tok.range)
         } else {
             self.expect(SyntaxKind::RAngle)
-        }.map(|t| t.range.end()).unwrap_or_else(|| resource.range.end());
+        }
+        .map(|t| t.range.end())
+        .unwrap_or_else(|| resource.range.end());
 
         Type::Own(Box::new(HandleType {
             resource,
@@ -1598,15 +1781,20 @@ impl<'a> Parser<'a> {
         if !self.at(SyntaxKind::LAngle) {
             return Type::Future(Box::new(FutureType {
                 inner: None,
-                range: TextRange::new(start, self.tokens.get(self.pos.saturating_sub(1))
-                    .map(|t| t.range.end())
-                    .unwrap_or(start)),
+                range: TextRange::new(
+                    start,
+                    self.tokens
+                        .get(self.pos.saturating_sub(1))
+                        .map(|t| t.range.end())
+                        .unwrap_or(start),
+                ),
             }));
         }
 
         let open_tok = self.bump();
         let inner = self.parse_type();
-        let end = self.expect_closing(SyntaxKind::RAngle, "future<>", open_tok.range)
+        let end = self
+            .expect_closing(SyntaxKind::RAngle, "future<>", open_tok.range)
             .map(|t| t.range.end())
             .unwrap_or_else(|| inner.range().end());
 
@@ -1622,15 +1810,20 @@ impl<'a> Parser<'a> {
         if !self.at(SyntaxKind::LAngle) {
             return Type::Stream(Box::new(StreamType {
                 inner: None,
-                range: TextRange::new(start, self.tokens.get(self.pos.saturating_sub(1))
-                    .map(|t| t.range.end())
-                    .unwrap_or(start)),
+                range: TextRange::new(
+                    start,
+                    self.tokens
+                        .get(self.pos.saturating_sub(1))
+                        .map(|t| t.range.end())
+                        .unwrap_or(start),
+                ),
             }));
         }
 
         let open_tok = self.bump();
         let inner = self.parse_type();
-        let end = self.expect_closing(SyntaxKind::RAngle, "stream<>", open_tok.range)
+        let end = self
+            .expect_closing(SyntaxKind::RAngle, "stream<>", open_tok.range)
             .map(|t| t.range.end())
             .unwrap_or_else(|| inner.range().end());
 
@@ -1677,7 +1870,8 @@ impl<'a> Parser<'a> {
                 self.expect_keyword_ident("version");
                 self.expect(SyntaxKind::Eq);
                 let version = self.parse_semver();
-                let end = self.expect(SyntaxKind::RParen)
+                let end = self
+                    .expect(SyntaxKind::RParen)
                     .map(|t| t.range.end())
                     .unwrap_or(version.range.end());
                 Gate::Since(SinceGate {
@@ -1689,9 +1883,11 @@ impl<'a> Parser<'a> {
                 // Parse: feature = name
                 self.expect_keyword_ident("feature");
                 self.expect(SyntaxKind::Eq);
-                let feature = self.parse_ident()
+                let feature = self
+                    .parse_ident()
                     .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)));
-                let end = self.expect(SyntaxKind::RParen)
+                let end = self
+                    .expect(SyntaxKind::RParen)
                     .map(|t| t.range.end())
                     .unwrap_or(feature.range.end());
                 Gate::Unstable(UnstableGate {
@@ -1704,7 +1900,8 @@ impl<'a> Parser<'a> {
                 self.expect_keyword_ident("version");
                 self.expect(SyntaxKind::Eq);
                 let version = self.parse_semver();
-                let end = self.expect(SyntaxKind::RParen)
+                let end = self
+                    .expect(SyntaxKind::RParen)
                     .map(|t| t.range.end())
                     .unwrap_or(version.range.end());
                 Gate::Deprecated(DeprecatedGate {
@@ -1747,11 +1944,18 @@ impl<'a> Parser<'a> {
         self.eat(SyntaxKind::Dot);
         let patch = self.parse_integer().unwrap_or(0);
 
-        let end = self.tokens.get(self.pos.saturating_sub(1))
+        let end = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
             .map(|t| t.range.end())
             .unwrap_or(start);
 
-        Version { major, minor, patch, range: TextRange::new(start, end) }
+        Version {
+            major,
+            minor,
+            patch,
+            range: TextRange::new(start, end),
+        }
     }
 
     fn parse_ident(&mut self) -> Option<Ident> {
@@ -2078,8 +2282,6 @@ interface api {
         assert!(result.has_errors());
     }
 
-
-
     #[test]
     fn parse_empty_enum() {
         let content = r#"interface types {
@@ -2142,7 +2344,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-
     #[test]
     fn parse_empty_use_list() {
         let content = r#"interface api {
@@ -2161,7 +2362,6 @@ interface api {
         let result = parse(content);
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_func_consecutive_errors() {
@@ -2202,7 +2402,6 @@ interface api {
         assert!(result.has_errors());
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_result_without_angle_brackets() {
@@ -2253,7 +2452,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-
     #[test]
     fn parse_tuple_trailing_comma() {
         let content = r#"interface api {
@@ -2282,7 +2480,6 @@ interface api {
         assert!(result.has_errors());
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_borrow_empty() {
@@ -2313,7 +2510,6 @@ interface api {
         assert!(result.has_errors());
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_variant_empty_parens() {
@@ -2365,7 +2561,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-
     #[test]
     fn parse_record_missing_field_name() {
         let content = r#"interface types {
@@ -2415,7 +2610,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-
     #[test]
     fn parse_interface_missing_name() {
         let content = r#"interface {
@@ -2455,7 +2649,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-
     #[test]
     fn parse_list_empty() {
         let content = r#"interface api {
@@ -2485,7 +2678,6 @@ interface api {
         assert!(result.has_errors());
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_resource_empty() {
@@ -2566,7 +2758,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-
     #[test]
     fn parse_stray_rbrace_at_top_level() {
         let content = r#"interface api {
@@ -2608,7 +2799,6 @@ interface api {
         assert_eq!(result.root.items.len(), 1);
     }
 
-
     #[test]
     fn parse_deeply_nested_types() {
         let content = r#"interface api {
@@ -2628,7 +2818,6 @@ interface api {
         assert!(result.has_errors());
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_package_missing_version() {
@@ -2653,7 +2842,6 @@ interface types {
         assert!(result.has_errors());
     }
 
-
     #[test]
     fn parse_type_alias_missing_equals() {
         let content = r#"interface api {
@@ -2673,7 +2861,6 @@ interface types {
         assert!(result.has_errors());
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_doc_comment_without_item() {
@@ -2697,7 +2884,6 @@ interface types {
         assert!(result.is_ok());
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_multiple_errors_in_one_interface() {
@@ -2755,7 +2941,6 @@ interface types {
             panic!("Expected interface");
         }
     }
-
 
     #[test]
     fn parse_future_with_type() {
@@ -2877,7 +3062,6 @@ interface types {
         assert_eq!(result.root.items.len(), 1);
     }
 
-
     #[test]
     fn parse_async_func() {
         let content = r#"interface api {
@@ -2958,13 +3142,17 @@ interface types {
             assert_eq!(iface.items.len(), 4);
 
             // Check each function's async status
-            let async_flags: Vec<bool> = iface.items.iter().filter_map(|item| {
-                if let InterfaceItem::Func(f) = item {
-                    Some(f.sig.is_async)
-                } else {
-                    None
-                }
-            }).collect();
+            let async_flags: Vec<bool> = iface
+                .items
+                .iter()
+                .filter_map(|item| {
+                    if let InterfaceItem::Func(f) = item {
+                        Some(f.sig.is_async)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
             assert_eq!(async_flags, vec![false, true, false, true]);
         }
@@ -3014,7 +3202,6 @@ interface types {
         assert!(result.is_ok());
         assert_eq!(result.root.items.len(), 1);
     }
-
 
     #[test]
     fn parse_since_gate_on_interface() {
@@ -3182,7 +3369,6 @@ interface clocks {
         }
     }
 
-
     #[test]
     fn parse_include_basic() {
         let content = r#"world my-world {
@@ -3257,7 +3443,6 @@ interface clocks {
             }
         }
     }
-
 
     #[test]
     fn parse_constructor_basic() {
@@ -3366,7 +3551,6 @@ interface clocks {
         }
     }
 
-
     #[test]
     fn parse_nested_package_single() {
         let content = r#"package local:foo {
@@ -3400,8 +3584,14 @@ package local:b {
         assert!(result.root.package.is_none());
         assert_eq!(result.root.nested_packages.len(), 2);
 
-        assert_eq!(result.root.nested_packages[0].package.name.name.as_ref(), "a");
-        assert_eq!(result.root.nested_packages[1].package.name.name.as_ref(), "b");
+        assert_eq!(
+            result.root.nested_packages[0].package.name.name.as_ref(),
+            "a"
+        );
+        assert_eq!(
+            result.root.nested_packages[1].package.name.name.as_ref(),
+            "b"
+        );
     }
 
     #[test]
@@ -3477,10 +3667,16 @@ package local:helper {
 
         // Should have both standalone and nested
         assert!(result.root.package.is_some());
-        assert_eq!(result.root.package.as_ref().unwrap().name.name.as_ref(), "app");
+        assert_eq!(
+            result.root.package.as_ref().unwrap().name.name.as_ref(),
+            "app"
+        );
 
         assert_eq!(result.root.nested_packages.len(), 1);
-        assert_eq!(result.root.nested_packages[0].package.name.name.as_ref(), "helper");
+        assert_eq!(
+            result.root.nested_packages[0].package.name.name.as_ref(),
+            "helper"
+        );
     }
 
     #[test]
@@ -3516,7 +3712,6 @@ world main-world {
         assert_eq!(result.root.items.len(), 2); // shared interface + main-world
         assert_eq!(result.root.nested_packages.len(), 1);
     }
-
 
     #[test]
     fn parse_simple_namespace() {
@@ -3653,7 +3848,6 @@ world main-world {
         assert_eq!(pkg.namespace[1].name.as_ref(), "bar");
         assert_eq!(pkg.name.name.as_ref(), "baz");
     }
-
 
     #[test]
     fn parse_wasi_random_insecure() {
