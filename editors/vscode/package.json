@@ -1,0 +1,108 @@
+{
+  "name": "wit-lsp",
+  "displayName": "WIT Language Support",
+  "description": "Language support for WebAssembly Interface Types (WIT)",
+  "version": "0.1.0",
+  "publisher": "witcraft",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ihorandrianov/witcraft-lsp"
+  },
+  "bugs": {
+    "url": "https://github.com/ihorandrianov/witcraft-lsp/issues"
+  },
+  "homepage": "https://github.com/ihorandrianov/witcraft-lsp#readme",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "wit",
+    "wasm",
+    "webassembly",
+    "component-model"
+  ],
+  "activationEvents": [
+    "onLanguage:wit"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "wit",
+        "aliases": [
+          "WIT",
+          "WebAssembly Interface Types"
+        ],
+        "extensions": [
+          ".wit"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "WIT Language Server",
+      "properties": {
+        "wit-lsp.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the witcraft-lsp executable. If empty, the extension downloads and caches the server."
+        },
+        "wit-lsp.server.releaseChannel": {
+          "type": "string",
+          "enum": [
+            "latest"
+          ],
+          "default": "latest",
+          "description": "Release channel used when downloading the language server."
+        },
+        "wit-lsp.server.version": {
+          "type": "string",
+          "default": "",
+          "description": "Pin a specific server version (example: v0.2.0). Overrides release channel."
+        },
+        "wit-lsp.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run bundle",
+    "typecheck": "tsc -p ./ --noEmit",
+    "compile": "npm run bundle",
+    "bundle": "npm run typecheck && esbuild src/extension.ts --bundle --platform=node --target=es2020 --outfile=out/extension.js --external:vscode --minify",
+    "bundle:analyze": "npm run typecheck && esbuild src/extension.ts --bundle --platform=node --target=es2020 --outfile=out/extension.js --external:vscode --minify --analyze",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "tar": "^7.5.7",
+    "vscode-languageclient": "^9.0.1",
+    "yauzl": "^2.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/yauzl": "^2.10.0",
+    "@types/vscode": "^1.75.0",
+    "esbuild": "^0.25.9",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^2.22.0",
+    "ovsx": "^0.10.9"
+  },
+  "overrides": {
+    "cheerio": "1.0.0-rc.12",
+    "undici": "5.28.4"
+  }
+}

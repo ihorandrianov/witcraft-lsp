@@ -35,15 +35,16 @@ impl Document {
     }
 
     pub fn parse(&mut self) -> &ParseResult {
-        if self.parse.is_none() {
-            self.parse = Some(witcraft_syntax::parse(&self.content));
-        }
-        self.parse.as_ref().unwrap()
+        self.parse
+            .get_or_insert_with(|| witcraft_syntax::parse(&self.content))
     }
 
     pub fn reparse(&mut self) -> &ParseResult {
         self.parse = Some(witcraft_syntax::parse(&self.content));
-        self.parse.as_ref().unwrap()
+        match self.parse.as_ref() {
+            Some(parse) => parse,
+            None => unreachable!("parse cache must be initialized after reparse"),
+        }
     }
 
     pub fn offset_to_position(&self, offset: u32) -> Position {

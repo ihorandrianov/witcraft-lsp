@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Language Server Protocol implementation for WIT (WebAssembly Interface Types)"
-repository = "https://github.com/user/witcraft-lsp"
+repository = "https://github.com/ihorandrianov/witcraft-lsp"
 keywords = ["wit", "wasm", "webassembly", "lsp", "language-server"]
 categories = ["development-tools", "wasm"]
 
@@ -23,3 +23,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 dashmap = "6"
+
+[dev-dependencies]
+serde_json = "1"
+tower = "0.4"
+futures-core = "0.3"

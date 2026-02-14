@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --lib
+
+      - name: Build witcraft-lsp
+        run: cargo build --release -p witcraft-lsp
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.18.1
+
+      - name: Install VS Code extension dependencies
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: Compile VS Code extension
+        working-directory: editors/vscode
+        run: npm run compile

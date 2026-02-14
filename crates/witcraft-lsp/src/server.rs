@@ -3,16 +3,18 @@ use crate::workspace::{
     AmbiguousType, CrossFileResolver, ResolveResult, SharedWorkspaceManager, UndefinedType,
     WorkspaceManager,
 };
+use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-use tracing::info;
+use tracing::{debug, info};
 use witcraft_syntax::{
-    DefinitionKind, GlobalDefinition, NodeRef, PackageId, SourceFile, SymbolIndex, SyntaxKind,
-    TextRange, node_at,
+    DefinitionKind, GlobalDefinition, LineIndex, NodeRef, PackageId, SourceFile, SymbolIndex,
+    SyntaxKind, TextRange, node_at,
 };
 
 const SEMANTIC_TOKEN_TYPES: &[SemanticTokenType] = &[
@@ -32,11 +34,41 @@ pub struct WitLanguageServer {
     client: Client,
     documents: SharedDocumentStore,
     workspace: SharedWorkspaceManager,
+    unopened_cache: DashMap<PathBuf, UnopenedFileCacheEntry>,
 }
 
 enum LocalGoto {
     Found(Location),
     NeedCrossFile(String),
+}
+
+struct SymbolTarget {
+    name: String,
+    resolved_definition: Option<GlobalDefinition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    modified: SystemTime,
+    len: u64,
+}
+
+#[derive(Debug, Clone)]
+struct UnopenedFileCacheEntry {
+    stamp: FileStamp,
+    root: Arc<SourceFile>,
+    index: Arc<SymbolIndex>,
+    line_index: Arc<LineIndex>,
+    package_id: Option<PackageId>,
+}
+
+fn file_change_label(change: FileChangeType) -> &'static str {
+    match change {
+        FileChangeType::CREATED => "created",
+        FileChangeType::CHANGED => "changed",
+        FileChangeType::DELETED => "deleted",
+        _ => "unknown",
+    }
 }
 
 impl WitLanguageServer {
@@ -45,6 +77,7 @@ impl WitLanguageServer {
             client,
             documents: Arc::new(DocumentStore::new()),
             workspace: Arc::new(WorkspaceManager::new()),
+            unopened_cache: DashMap::new(),
         }
     }
 
@@ -53,43 +86,32 @@ impl WitLanguageServer {
     }
 
     fn reindex_file_from_disk(&self, uri: &str) {
-        let Some(path) = Self::uri_to_file_path(uri) else {
-            return;
-        };
-
-        let Ok(content) = std::fs::read_to_string(path) else {
+        let Some(entry) = self.cached_unopened_entry(uri) else {
             self.workspace.remove_file(uri);
             return;
         };
 
-        let parse_result = witcraft_syntax::parse(&content);
-        let index = SymbolIndex::build(&parse_result.root);
-        let package_id = parse_result
-            .root
-            .package
-            .as_ref()
-            .map(PackageId::from_package_decl);
-        self.workspace.update_file_definitions(uri, &index, package_id);
+        debug!(uri = %uri, source = "disk", "reindexed file from disk");
+        self.workspace
+            .update_file_definitions(uri, entry.index.as_ref(), entry.package_id);
     }
 
     fn index_and_line_index_for_uri(
         &self,
         uri: &str,
-    ) -> Option<(SymbolIndex, witcraft_syntax::LineIndex)> {
+    ) -> Option<(Arc<SymbolIndex>, Arc<LineIndex>)> {
         if let Some(from_open_doc) = self.documents.with_document_mut(uri, |doc| {
             let parse = doc.parse().clone();
             let index = SymbolIndex::build(&parse.root);
-            (index, doc.line_index.clone())
+            (Arc::new(index), Arc::new(doc.line_index.clone()))
         }) {
+            debug!(uri = %uri, source = "open_doc", "index source");
             return Some(from_open_doc);
         }
 
-        let path = Self::uri_to_file_path(uri)?;
-        let content = std::fs::read_to_string(path).ok()?;
-        let parse = witcraft_syntax::parse(&content);
-        let index = SymbolIndex::build(&parse.root);
-        let line_index = witcraft_syntax::LineIndex::new(&content);
-        Some((index, line_index))
+        let entry = self.cached_unopened_entry(uri)?;
+        debug!(uri = %uri, source = "disk", "index source");
+        Some((entry.index, entry.line_index))
     }
 
     fn range_to_lsp_in_uri(&self, uri: &str, range: witcraft_syntax::TextRange) -> Option<Range> {
@@ -97,10 +119,8 @@ impl WitLanguageServer {
             return Some(doc_range);
         }
 
-        let path = Self::uri_to_file_path(uri)?;
-        let content = std::fs::read_to_string(path).ok()?;
-        let line_index = witcraft_syntax::LineIndex::new(&content);
-        Some(range_to_lsp_with_index(&line_index, range))
+        let entry = self.cached_unopened_entry(uri)?;
+        Some(range_to_lsp_with_index(entry.line_index.as_ref(), range))
     }
 
     fn interface_name_range_in_uri(&self, uri: &str, interface_name: &str) -> Option<Range> {
@@ -112,16 +132,65 @@ impl WitLanguageServer {
             return doc_range;
         }
 
-        let path = Self::uri_to_file_path(uri)?;
-        let content = std::fs::read_to_string(path).ok()?;
-        let parse = witcraft_syntax::parse(&content);
-        let range = find_interface_name_range(&parse.root, interface_name)?;
-        let line_index = witcraft_syntax::LineIndex::new(&content);
-        Some(range_to_lsp_with_index(&line_index, range))
+        let entry = self.cached_unopened_entry(uri)?;
+        let range = find_interface_name_range(entry.root.as_ref(), interface_name)?;
+        Some(range_to_lsp_with_index(entry.line_index.as_ref(), range))
     }
 
     fn try_url(uri: &str) -> Option<Url> {
         Url::parse(uri).ok()
+    }
+
+    fn file_stamp(path: &Path) -> Option<FileStamp> {
+        let metadata = std::fs::metadata(path).ok()?;
+        let modified = metadata.modified().ok()?;
+        Some(FileStamp {
+            modified,
+            len: metadata.len(),
+        })
+    }
+
+    fn load_unopened_entry(path: &Path, stamp: FileStamp) -> Option<UnopenedFileCacheEntry> {
+        let content = std::fs::read_to_string(path).ok()?;
+        let parse_result = witcraft_syntax::parse(&content);
+        let index = SymbolIndex::build(&parse_result.root);
+        let package_id = parse_result
+            .root
+            .package
+            .as_ref()
+            .map(PackageId::from_package_decl);
+        let line_index = LineIndex::new(&content);
+
+        Some(UnopenedFileCacheEntry {
+            stamp,
+            root: Arc::new(parse_result.root),
+            index: Arc::new(index),
+            line_index: Arc::new(line_index),
+            package_id,
+        })
+    }
+
+    fn cached_unopened_entry(&self, uri: &str) -> Option<UnopenedFileCacheEntry> {
+        let path = Self::uri_to_file_path(uri)?;
+        let Some(stamp) = Self::file_stamp(&path) else {
+            self.unopened_cache.remove(&path);
+            return None;
+        };
+
+        if let Some(entry) = self.unopened_cache.get(&path) {
+            if entry.stamp == stamp {
+                debug!(uri = %uri, source = "cache", "unopened cache hit");
+                return Some(entry.clone());
+            }
+        }
+
+        let Some(entry) = Self::load_unopened_entry(&path, stamp) else {
+            self.unopened_cache.remove(&path);
+            return None;
+        };
+        self.unopened_cache.insert(path, entry.clone());
+        debug!(uri = %uri, source = "disk", "unopened cache refresh");
+        Some(entry)
     }
 
     async fn on_change(&self, uri: &str) {
@@ -291,19 +360,8 @@ impl WitLanguageServer {
                     continue;
                 }
 
-                // Read and index the file
-                if let Ok(content) = std::fs::read_to_string(&entry_path) {
-                    info!("Indexing sibling file: {}", sibling_uri);
-                    let parse_result = witcraft_syntax::parse(&content);
-                    let index = SymbolIndex::build(&parse_result.root);
-                    let package_id = parse_result
-                        .root
-                        .package
-                        .as_ref()
-                        .map(PackageId::from_package_decl);
-                    self.workspace
-                        .update_file_definitions(&sibling_uri, &index, package_id);
-                }
+                info!("Indexing sibling file: {}", sibling_uri);
+                self.reindex_file_from_disk(&sibling_uri);
             }
         }
     }
@@ -408,6 +466,9 @@ impl LanguageServer for WitLanguageServer {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
+        if let Some(path) = Self::uri_to_file_path(&uri) {
+            self.unopened_cache.remove(&path);
+        }
         self.documents.open(
             uri.clone(),
             params.text_document.version,
@@ -441,11 +502,19 @@ impl LanguageServer for WitLanguageServer {
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         for change in params.changes {
             let uri = change.uri.to_string();
+            debug!(uri = %uri, change = file_change_label(change.typ), "watched file change");
             match change.typ {
-                FileChangeType::DELETED => self.workspace.remove_file(&uri),
+                FileChangeType::DELETED => {
+                    if let Some(path) = Self::uri_to_file_path(&uri) {
+                        self.unopened_cache.remove(&path);
+                    }
+                    self.workspace.remove_file(&uri)
+                }
                 FileChangeType::CREATED | FileChangeType::CHANGED => {
                     if !self.documents.contains(&uri) {
                         self.reindex_file_from_disk(&uri);
+                    } else if let Some(path) = Self::uri_to_file_path(&uri) {
+                        self.unopened_cache.remove(&path);
                     }
                 }
                 _ => {}
@@ -676,8 +745,8 @@ impl LanguageServer for WitLanguageServer {
         let position = params.text_document_position.position;
         let include_declaration = params.context.include_declaration;
 
-        // First get the symbol name from the current position
-        let name = self
+        // First resolve the symbol target from the current position.
+        let target = self
             .documents
             .with_document_mut(&uri, |doc| {
                 let offset = doc.position_to_offset(witcraft_syntax::Position::new(
@@ -686,7 +755,19 @@ impl LanguageServer for WitLanguageServer {
                 ))?;
 
                 let parse = doc.parse();
+                let index = SymbolIndex::build(&parse.root);
                 let node = node_at(&parse.root, offset)?;
+
+                if let Some(def) = index
+                    .definitions()
+                    .iter()
+                    .find(|def| def.name_range.contains(offset))
+                {
+                    return Some(SymbolTarget {
+                        name: def.name.to_string(),
+                        resolved_definition: Some(GlobalDefinition::from_definition(def, &uri)),
+                    });
+                }
 
                 let name = match node {
                     NodeRef::NamedType(named) => named.name.name.to_string(),
@@ -703,13 +784,25 @@ impl LanguageServer for WitLanguageServer {
                     _ => return None,
                 };
 
-                Some(name)
+                let resolved_definition = match CrossFileResolver::new(&self.workspace)
+                    .resolve_type(&uri, &name, &index)
+                {
+                    ResolveResult::Found(def) => Some(def),
+                    _ => None,
+                };
+
+                Some(SymbolTarget {
+                    name,
+                    resolved_definition,
+                })
             })
             .flatten();
 
-        let Some(name) = name else {
+        let Some(target) = target else {
             return Ok(None);
         };
+        let name = &target.name;
+        let resolver = CrossFileResolver::new(&self.workspace);
 
         // Get all files in the same package
         let package_files = self.workspace.files_in_same_package(&uri);
@@ -726,6 +819,9 @@ impl LanguageServer for WitLanguageServer {
             let Some((index, line_index)) = self.index_and_line_index_for_uri(file_uri) else {
                 continue;
             };
+
+            let index = index.as_ref();
+            let line_index = line_index.as_ref();
             let Ok(url) = Url::parse(file_uri) else {
                 continue;
             };
@@ -734,21 +830,42 @@ impl LanguageServer for WitLanguageServer {
 
             // Include declaration if requested
             if include_declaration {
-                if let Some(def) = index.find_definition(&name) {
+                if let Some(target_def) = &target.resolved_definition {
+                    for def in index.definitions() {
+                        let global = GlobalDefinition::from_definition(def, file_uri.as_str());
+                        if same_global_definition(&global, target_def) {
+                            file_locs.push(Location::new(
+                                url.clone(),
+                                range_to_lsp_with_index(line_index, def.name_range),
+                            ));
+                        }
+                    }
+                } else if let Some(def) = index.find_definition(name) {
                     file_locs.push(Location::new(
                         url.clone(),
-                        range_to_lsp_with_index(&line_index, def.name_range),
+                        range_to_lsp_with_index(line_index, def.name_range),
                     ));
                 }
             }
 
             // Find all references
-            for reference in index.references() {
-                if &*reference.name == name {
-                    file_locs.push(Location::new(
-                        url.clone(),
-                        range_to_lsp_with_index(&line_index, reference.range),
-                    ));
+            let include_refs_in_file = if let Some(target_def) = &target.resolved_definition {
+                match resolver.resolve_type(file_uri, name, index) {
+                    ResolveResult::Found(found) => same_global_definition(&found, target_def),
+                    _ => false,
+                }
+            } else {
+                true
+            };
+
+            if include_refs_in_file {
+                for reference in index.references() {
+                    if &*reference.name == name {
+                        file_locs.push(Location::new(
+                            url.clone(),
+                            range_to_lsp_with_index(line_index, reference.range),
+                        ));
+                    }
                 }
             }
 
@@ -1042,7 +1159,9 @@ impl LanguageServer for WitLanguageServer {
         // Get the document and build index
         let context = self.documents.with_document_mut(&uri, |doc| {
             let line_index = doc.line_index.clone();
+            let content = doc.content.clone();
             let parse = doc.parse();
+            let root = parse.root.clone();
             let index = SymbolIndex::build(&parse.root);
             let use_path_ranges = collect_use_path_ranges(&parse.root);
             let resolver = CrossFileResolver::new(&self.workspace);
@@ -1053,25 +1172,17 @@ impl LanguageServer for WitLanguageServer {
                 line_index.offset(witcraft_syntax::Position::new(pos.line, pos.character))
             };
 
-            // Find the first interface/world for insertion point
-            let first_item_start = parse.root.items.first().map(|item| {
-                match item {
-                    witcraft_syntax::ast::Item::Interface(iface) => iface.range.start() + 1, // after '{'
-                    witcraft_syntax::ast::Item::World(world) => world.range.start() + 1,
-                    witcraft_syntax::ast::Item::TypeDef(td) => td.range().start(),
-                }
-            });
-
             (
                 index,
-                first_item_start,
+                root,
                 line_index.clone(),
+                content,
                 use_path_ranges,
                 ambiguous_types,
             )
         });
 
-        let Some((index, first_item_start, line_index, use_path_ranges, ambiguous_types)) =
+        let Some((index, root, line_index, content, use_path_ranges, ambiguous_types)) =
             context
         else {
             return Ok(None);
@@ -1082,7 +1193,7 @@ impl LanguageServer for WitLanguageServer {
             // Handle "unused import" diagnostics
             if diag.message.starts_with("unused import") {
                 if let Some(action) =
-                    self.make_remove_import_action(&uri, diag, &index, &line_index)
+                    self.make_remove_import_action(&uri, diag, &index, &line_index, &content)
                 {
                     actions.push(action);
                 }
@@ -1091,7 +1202,7 @@ impl LanguageServer for WitLanguageServer {
             // Handle "undefined type" diagnostics
             if diag.message.starts_with("undefined type") {
                 if let Some(action) =
-                    self.make_add_import_action(&uri, diag, &index, first_item_start, &line_index)
+                    self.make_add_import_action(&uri, diag, &index, &root, &line_index)
                 {
                     actions.push(action);
                 }
@@ -1179,8 +1290,8 @@ impl LanguageServer for WitLanguageServer {
         let position = params.text_document_position.position;
         let new_name = params.new_name;
 
-        // First, find the symbol at the position
-        let symbol_name = self
+        // First, resolve the symbol target at the position.
+        let target = self
             .documents
             .with_document_mut(&uri, |doc| {
                 let offset = doc.position_to_offset(witcraft_syntax::Position::new(
@@ -1189,29 +1300,54 @@ impl LanguageServer for WitLanguageServer {
                 ))?;
 
                 let parse = doc.parse();
+                let index = SymbolIndex::build(&parse.root);
                 let node = node_at(&parse.root, offset)?;
 
-                // Get the symbol name
-                match node {
-                    NodeRef::Ident(ident) => Some(ident.name.to_string()),
-                    NodeRef::Interface(iface) => Some(iface.name.name.to_string()),
-                    NodeRef::World(world) => Some(world.name.name.to_string()),
-                    NodeRef::Record(rec) => Some(rec.name.name.to_string()),
-                    NodeRef::Variant(var) => Some(var.name.name.to_string()),
-                    NodeRef::Enum(e) => Some(e.name.name.to_string()),
-                    NodeRef::Flags(f) => Some(f.name.name.to_string()),
-                    NodeRef::Resource(res) => Some(res.name.name.to_string()),
-                    NodeRef::TypeAlias(alias) => Some(alias.name.name.to_string()),
-                    NodeRef::Func(func) => Some(func.name.name.to_string()),
-                    NodeRef::NamedType(named) => Some(named.name.name.to_string()),
-                    _ => None,
+                if let Some(def) = index
+                    .definitions()
+                    .iter()
+                    .find(|def| def.name_range.contains(offset))
+                {
+                    return Some(SymbolTarget {
+                        name: def.name.to_string(),
+                        resolved_definition: Some(GlobalDefinition::from_definition(def, &uri)),
+                    });
                 }
+
+                let name = match node {
+                    NodeRef::Ident(ident) => ident.name.to_string(),
+                    NodeRef::Interface(iface) => iface.name.name.to_string(),
+                    NodeRef::World(world) => world.name.name.to_string(),
+                    NodeRef::Record(rec) => rec.name.name.to_string(),
+                    NodeRef::Variant(var) => var.name.name.to_string(),
+                    NodeRef::Enum(e) => e.name.name.to_string(),
+                    NodeRef::Flags(f) => f.name.name.to_string(),
+                    NodeRef::Resource(res) => res.name.name.to_string(),
+                    NodeRef::TypeAlias(alias) => alias.name.name.to_string(),
+                    NodeRef::Func(func) => func.name.name.to_string(),
+                    NodeRef::NamedType(named) => named.name.name.to_string(),
+                    _ => return None,
+                };
+
+                let resolved_definition = match CrossFileResolver::new(&self.workspace)
+                    .resolve_type(&uri, &name, &index)
+                {
+                    ResolveResult::Found(def) => Some(def),
+                    _ => None,
+                };
+
+                Some(SymbolTarget {
+                    name,
+                    resolved_definition,
+                })
             })
             .flatten();
 
-        let Some(old_name) = symbol_name else {
+        let Some(target) = target else {
             return Ok(None);
         };
+        let old_name = &target.name;
+        let resolver = CrossFileResolver::new(&self.workspace);
 
         // Get all files in the same package
         let package_files = self.workspace.files_in_same_package(&uri);
@@ -1230,33 +1366,69 @@ impl LanguageServer for WitLanguageServer {
                 continue;
             };
 
+            let index = index.as_ref();
+            let line_index = line_index.as_ref();
+
             let mut edits = Vec::new();
 
             // Find definition in this file
-            if let Some(def) = index.find_definition(&old_name) {
+            if let Some(target_def) = &target.resolved_definition {
+                for def in index.definitions() {
+                    let global = GlobalDefinition::from_definition(def, file_uri.as_str());
+                    if same_global_definition(&global, target_def) {
+                        edits.push(TextEdit {
+                            range: range_to_lsp_with_index(line_index, def.name_range),
+                            new_text: new_name.clone(),
+                        });
+                    }
+                }
+            } else if let Some(def) = index.find_definition(old_name) {
                 edits.push(TextEdit {
-                    range: range_to_lsp_with_index(&line_index, def.name_range),
+                    range: range_to_lsp_with_index(line_index, def.name_range),
                     new_text: new_name.clone(),
                 });
             }
 
             // Find all references in this file
-            for reference in index.references() {
-                if &*reference.name == old_name {
-                    edits.push(TextEdit {
-                        range: range_to_lsp_with_index(&line_index, reference.range),
-                        new_text: new_name.clone(),
-                    });
+            let include_refs_in_file = if let Some(target_def) = &target.resolved_definition {
+                match resolver.resolve_type(file_uri, old_name, index) {
+                    ResolveResult::Found(found) => same_global_definition(&found, target_def),
+                    _ => false,
+                }
+            } else {
+                true
+            };
+
+            if include_refs_in_file {
+                for reference in index.references() {
+                    if &*reference.name == old_name {
+                        edits.push(TextEdit {
+                            range: range_to_lsp_with_index(line_index, reference.range),
+                            new_text: new_name.clone(),
+                        });
+                    }
                 }
             }
 
             // Find imports that reference this name
             for import in index.imports() {
+                let import_matches_target = if let Some(target_def) = &target.resolved_definition {
+                    match resolver.resolve_type(file_uri, &import.local_name, index) {
+                        ResolveResult::Found(found) => same_global_definition(&found, target_def),
+                        _ => false,
+                    }
+                } else {
+                    true
+                };
+                if !import_matches_target {
+                    continue;
+                }
+
                 if &*import.original_name == old_name {
                     // Rename the original name in the import statement
                     // For `use iface.{old-name as alias}`, we rename `old-name`
                     edits.push(TextEdit {
-                        range: range_to_lsp_with_index(&line_index, import.original_name_range),
+                        range: range_to_lsp_with_index(line_index, import.original_name_range),
                         new_text: new_name.clone(),
                     });
 
@@ -1271,7 +1443,7 @@ impl LanguageServer for WitLanguageServer {
                     // e.g., `use iface.{something as old-name}`
                     // Rename the alias
                     edits.push(TextEdit {
-                        range: range_to_lsp_with_index(&line_index, import.range),
+                        range: range_to_lsp_with_index(line_index, import.range),
                         new_text: new_name.clone(),
                     });
                 }
@@ -1610,6 +1782,7 @@ impl WitLanguageServer {
         diag: &Diagnostic,
         index: &SymbolIndex,
         line_index: &witcraft_syntax::LineIndex,
+        content: &str,
     ) -> Option<CodeActionOrCommand> {
         // Extract the import name from the diagnostic message
         let name = diag
@@ -1632,9 +1805,7 @@ impl WitLanguageServer {
             // Only import in this use statement - delete the whole statement
             import.use_statement_range
         } else {
-            // Multiple imports - just delete this item
-            // We'll delete the item_range, though this might leave a dangling comma
-            import.item_range
+            delete_import_item_range(import, content)
         };
 
         // Convert to LSP range
@@ -1678,14 +1849,11 @@ impl WitLanguageServer {
         uri: &str,
         diag: &Diagnostic,
         index: &SymbolIndex,
-        first_item_start: Option<u32>,
+        root: &SourceFile,
         line_index: &witcraft_syntax::LineIndex,
     ) -> Option<CodeActionOrCommand> {
         // Extract the type name from the diagnostic message
-        let type_name = diag
-            .message
-            .strip_prefix("undefined type `")?
-            .strip_suffix('`')?;
+        let type_name = extract_backticked_name(&diag.message, "undefined type ")?;
 
         // Find where this type is defined in the workspace
         let global_def = self.workspace.find_definition(uri, type_name)?;
@@ -1693,46 +1861,50 @@ impl WitLanguageServer {
         // Get the interface that contains this type
         let interface_name = global_def.parent.as_ref()?;
 
-        // Check if we already have a use statement for this interface
-        let existing_use = index
+        let scope_offset = line_index.offset(witcraft_syntax::Position::new(
+            diag.range.start.line,
+            diag.range.start.character,
+        ))?;
+        let insertion = find_import_insertion(root, scope_offset);
+        let mut insert_offset = insertion.offset;
+        if !insertion.after_existing_use {
+            let insert_line = line_index.position(insert_offset).line;
+            if let Some(line_range) = line_index.line_range(insert_line) {
+                insert_offset = line_range.start();
+            }
+        }
+        let pos = line_index.position(insert_offset);
+        let insert_position = tower_lsp::lsp_types::Position {
+            line: pos.line,
+            character: pos.column,
+        };
+
+        // Check if we already have a matching import in this file.
+        let already_imported = index
             .imports()
             .iter()
-            .find(|i| i.from_interface == *interface_name);
+            .any(|i| i.from_interface == *interface_name && i.original_name.as_ref() == type_name);
+        if already_imported {
+            return None;
+        }
 
-        let (insert_pos, new_text) = if let Some(_existing) = existing_use {
-            // Add to existing use statement - insert before the closing brace
-            // Find the position just before the closing brace '}'
-            // This is a simplification - ideally we'd parse the exact position
-            // For now, we'll create a new use statement instead
-            let insert_offset = first_item_start.unwrap_or(0);
-            let pos = line_index.position(insert_offset);
-            let insert_position = tower_lsp::lsp_types::Position {
-                line: pos.line,
-                character: pos.column,
-            };
-            (
-                insert_position,
-                format!("\n    use {}.{{{}}};", interface_name, type_name),
+        let new_text = if insertion.after_existing_use {
+            format!(
+                "\n{}use {}.{{{}}};",
+                insertion.indent, interface_name, type_name
             )
         } else {
-            // Create a new use statement at the start of the interface
-            let insert_offset = first_item_start.unwrap_or(0);
-            let pos = line_index.position(insert_offset);
-            let insert_position = tower_lsp::lsp_types::Position {
-                line: pos.line,
-                character: pos.column,
-            };
-            (
-                insert_position,
-                format!("\n    use {}.{{{}}};", interface_name, type_name),
+            format!(
+                "{}use {}.{{{}}};\n",
+                insertion.indent, interface_name, type_name
             )
         };
 
         // Create the text edit
         let edit = TextEdit {
             range: Range {
-                start: insert_pos,
-                end: insert_pos,
+                start: insert_position,
+                end: insert_position,
             },
             new_text,
         };
@@ -1847,6 +2019,12 @@ struct AmbiguousCandidateEdit {
     uri: String,
 }
 
+struct ImportInsertion {
+    offset: u32,
+    indent: &'static str,
+    after_existing_use: bool,
+}
+
 fn collect_use_path_ranges(root: &SourceFile) -> HashMap<String, TextRange> {
     let mut ranges = HashMap::new();
     collect_use_path_ranges_in_items(&root.items, &mut ranges);
@@ -1912,6 +2090,135 @@ fn collect_ambiguous_candidates(defs: Vec<GlobalDefinition>) -> Vec<AmbiguousCan
     });
     candidates.dedup_by(|a, b| a.interface == b.interface && a.uri == b.uri);
     candidates
+}
+
+fn same_global_definition(a: &GlobalDefinition, b: &GlobalDefinition) -> bool {
+    a.uri == b.uri
+        && a.name == b.name
+        && a.name_range == b.name_range
+        && a.parent.as_deref() == b.parent.as_deref()
+}
+
+fn delete_import_item_range(import: &witcraft_syntax::Import, content: &str) -> TextRange {
+    let bytes = content.as_bytes();
+    let stmt_start = import.use_statement_range.start() as usize;
+    let stmt_end = import.use_statement_range.end() as usize;
+    let item_start = import.item_range.start() as usize;
+    let item_end = import.item_range.end() as usize;
+
+    let mut end = item_end;
+    while end < stmt_end && is_ascii_space(bytes[end]) {
+        end += 1;
+    }
+    if end < stmt_end && bytes[end] == b',' {
+        end += 1;
+        while end < stmt_end && is_ascii_space(bytes[end]) {
+            end += 1;
+        }
+        return TextRange::new(item_start as u32, end as u32);
+    }
+
+    let mut start = item_start;
+    while start > stmt_start && is_ascii_space(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start > stmt_start && bytes[start - 1] == b',' {
+        start -= 1;
+        while start > stmt_start && is_ascii_space(bytes[start - 1]) {
+            start -= 1;
+        }
+    }
+
+    TextRange::new(start as u32, item_end as u32)
+}
+
+fn is_ascii_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+fn find_import_insertion(root: &SourceFile, scope_offset: u32) -> ImportInsertion {
+    for item in &root.items {
+        match item {
+            witcraft_syntax::Item::Interface(iface) if iface.range.contains(scope_offset) => {
+                if let Some(last_use_end) = iface.items.iter().rev().find_map(|i| match i {
+                    witcraft_syntax::InterfaceItem::Use(use_stmt) => Some(use_stmt.range.end()),
+                    _ => None,
+                }) {
+                    return ImportInsertion {
+                        offset: last_use_end,
+                        indent: "    ",
+                        after_existing_use: true,
+                    };
+                }
+                if let Some(first_item) = iface.items.first() {
+                    return ImportInsertion {
+                        offset: first_item.range().start(),
+                        indent: "    ",
+                        after_existing_use: false,
+                    };
+                }
+                return ImportInsertion {
+                    offset: iface.range.end().saturating_sub(1),
+                    indent: "    ",
+                    after_existing_use: false,
+                };
+            }
+            witcraft_syntax::Item::World(world) if world.range.contains(scope_offset) => {
+                if let Some(last_use_end) = world.items.iter().rev().find_map(|i| match i {
+                    witcraft_syntax::WorldItem::Use(use_stmt) => Some(use_stmt.range.end()),
+                    _ => None,
+                }) {
+                    return ImportInsertion {
+                        offset: last_use_end,
+                        indent: "    ",
+                        after_existing_use: true,
+                    };
+                }
+                if let Some(first_item) = world.items.first() {
+                    return ImportInsertion {
+                        offset: first_item.range().start(),
+                        indent: "    ",
+                        after_existing_use: false,
+                    };
+                }
+                return ImportInsertion {
+                    offset: world.range.end().saturating_sub(1),
+                    indent: "    ",
+                    after_existing_use: false,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(last_use) = root.uses.last() {
+        return ImportInsertion {
+            offset: last_use.range.end(),
+            indent: "",
+            after_existing_use: true,
+        };
+    }
+    if let Some(first_item) = root.items.first() {
+        return ImportInsertion {
+            offset: first_item.range().start(),
+            indent: "",
+            after_existing_use: false,
+        };
+    }
+
+    ImportInsertion {
+        offset: root.range.end(),
+        indent: "",
+        after_existing_use: false,
+    }
+}
+
+fn extract_backticked_name<'a>(message: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = message.strip_prefix(prefix)?;
+    let start = rest.find('`')?;
+    let rest = &rest[start + 1..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
 }
 
 fn make_unique_interface_name(
@@ -4705,6 +5012,271 @@ interface internal {}"#;
                 .iter()
                 .all(|d| !d.message.contains("ambiguous type `user`")),
             "expected ambiguity to be resolved by code action"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn regression_remove_unused_import_keeps_use_syntax_valid() {
+        let root = unique_test_dir("unused-import-cleanup");
+        let api_path = root.join("api.wit");
+
+        let api_content = r#"interface api {
+    use types.{foo, bar};
+    type x = foo;
+}"#;
+        write_file(&api_path, api_content);
+        let api_uri = file_uri(&api_path);
+
+        let (mut service, mut socket) = init_service().await;
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": api_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": api_content
+                }
+            }),
+        )
+        .await;
+
+        let diagnostics = wait_for_diagnostics(&mut socket, &api_uri)
+            .await
+            .expect("expected diagnostics for opened file");
+        let diag = diagnostics
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("unused import `bar`"))
+            .expect("expected unused import diagnostic");
+
+        let result = send_request(
+            &mut service,
+            21,
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "range": diag.range,
+                "context": {
+                    "diagnostics": [diag],
+                    "only": ["quickfix"]
+                }
+            }),
+        )
+        .await;
+        let actions: CodeActionResponse = serde_json::from_value(result).unwrap_or_default();
+        let edit = actions
+            .iter()
+            .find_map(|action| match action {
+                CodeActionOrCommand::CodeAction(action)
+                    if action.title.contains("Remove unused import `bar`") =>
+                {
+                    action.edit.as_ref()
+                }
+                _ => None,
+            })
+            .expect("expected remove import code action");
+        let updated = apply_text_edits(
+            api_content,
+            edit.changes
+                .as_ref()
+                .and_then(|changes| changes.get(&Url::parse(&api_uri).unwrap()))
+                .expect("expected edits for api file"),
+        );
+
+        assert!(
+            updated.contains("use types.{foo};"),
+            "expected import list to stay syntactically valid"
+        );
+        assert!(
+            !updated.contains("foo, }"),
+            "should not leave dangling comma in use list"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn regression_add_missing_import_targets_current_scope() {
+        let root = unique_test_dir("add-import-scope");
+        let api_path = root.join("api.wit");
+        let types_path = root.join("types.wit");
+        let api_content = r#"interface first {
+    type t = u32;
+}
+
+interface api {
+    get-user: func() -> user;
+}"#;
+        let types_content = r#"interface types {
+    record user {
+        id: u64,
+    }
+}"#;
+        write_file(&api_path, api_content);
+        write_file(&types_path, types_content);
+        let api_uri = file_uri(&api_path);
+
+        let (mut service, mut socket) = init_service().await;
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": api_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": api_content
+                }
+            }),
+        )
+        .await;
+
+        let diagnostics = wait_for_diagnostics(&mut socket, &api_uri)
+            .await
+            .expect("expected diagnostics for opened file");
+        let diag = diagnostics
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("undefined type `user`"))
+            .expect("expected undefined type diagnostic");
+
+        let result = send_request(
+            &mut service,
+            22,
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "range": diag.range,
+                "context": {
+                    "diagnostics": [diag],
+                    "only": ["quickfix"]
+                }
+            }),
+        )
+        .await;
+        let actions: CodeActionResponse = serde_json::from_value(result).unwrap_or_default();
+        let edit = actions
+            .iter()
+            .find_map(|action| match action {
+                CodeActionOrCommand::CodeAction(action)
+                    if action.title.contains("Import `user` from `types`") =>
+                {
+                    action.edit.as_ref()
+                }
+                _ => None,
+            })
+            .expect("expected add import code action");
+        let updated = apply_text_edits(
+            api_content,
+            edit.changes
+                .as_ref()
+                .and_then(|changes| changes.get(&Url::parse(&api_uri).unwrap()))
+                .expect("expected edits for api file"),
+        );
+
+        assert!(
+            updated.contains("interface api {\n    use types.{user};\n    get-user: func() -> user;"),
+            "import should be inserted inside the interface that has the undefined type; updated:\n{}",
+            updated
+        );
+        assert!(
+            !updated.contains("interface first {\n    use types.{user};"),
+            "import must not be inserted into unrelated first scope; updated:\n{}",
+            updated
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn regression_rename_homonyms_only_updates_selected_definition() {
+        let root = unique_test_dir("rename-homonyms");
+        let types_a_path = root.join("types-a.wit");
+        let types_b_path = root.join("types-b.wit");
+        let api_path = root.join("api.wit");
+
+        let types_a_content = r#"interface a {
+    record user {
+        id: u64,
+    }
+}"#;
+        let types_b_content = r#"interface b {
+    record user {
+        id: u64,
+    }
+}"#;
+        let api_content = r#"interface api {
+    use a.{user as a-user};
+    use b.{user as b-user};
+    take-a: func(x: a-user);
+    take-b: func(x: b-user);
+}"#;
+        write_file(&types_a_path, types_a_content);
+        write_file(&types_b_path, types_b_content);
+        write_file(&api_path, api_content);
+
+        let types_a_uri = file_uri(&types_a_path);
+        let api_uri = file_uri(&api_path);
+
+        let (mut service, _) = init_service().await;
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": types_a_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": types_a_content
+                }
+            }),
+        )
+        .await;
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": api_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": api_content
+                }
+            }),
+        )
+        .await;
+
+        let result = send_request(
+            &mut service,
+            23,
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": types_a_uri },
+                "position": { "line": 1, "character": 12 },
+                "newName": "account"
+            }),
+        )
+        .await;
+        let edit: WorkspaceEdit = serde_json::from_value(result).unwrap();
+        let changes = edit.changes.unwrap_or_default();
+
+        let updated_api = apply_text_edits(
+            api_content,
+            changes
+                .get(&Url::parse(&api_uri).unwrap())
+                .expect("expected api edits"),
+        );
+        assert!(
+            updated_api.contains("use a.{account as a-user};"),
+            "rename should update import that resolves to selected definition"
+        );
+        assert!(
+            updated_api.contains("use b.{user as b-user};"),
+            "rename should not touch homonym import from different definition"
         );
 
         fs::remove_dir_all(root).ok();

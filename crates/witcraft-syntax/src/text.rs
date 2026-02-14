@@ -65,14 +65,16 @@ impl Position {
 
 /// Index for converting between byte offsets and line/column positions.
 ///
-/// LSP uses line/column, but our lexer/parser uses byte offsets.
-/// This provides O(log n) conversion in both directions.
+/// LSP uses line/UTF-16 code units, while our lexer/parser uses byte offsets.
+/// This provides O(log n) line lookup with per-line conversion.
 #[derive(Debug, Clone)]
 pub struct LineIndex {
     /// Byte offset where each line starts. First element is always 0.
     line_starts: Vec<u32>,
     /// Total length of the source in bytes.
     len: u32,
+    /// Source text for UTF-16 column conversion.
+    text: String,
 }
 
 impl LineIndex {
@@ -93,10 +95,11 @@ impl LineIndex {
         Self {
             line_starts,
             len: text.len() as u32,
+            text: text.to_string(),
         }
     }
 
-    /// Convert a byte offset to a line/column position.
+    /// Convert a byte offset to a line/UTF-16-column position.
     pub fn position(&self, offset: u32) -> Position {
         let offset = offset.min(self.len);
 
@@ -106,18 +109,36 @@ impl LineIndex {
             .unwrap_or_else(|next_line| next_line - 1);
 
         let line_start = self.line_starts[line];
-        let column = offset - line_start;
+        let column = self.utf16_column(line_start, offset);
 
         Position::new(line as u32, column)
     }
 
-    /// Convert a line/column position to a byte offset.
+    /// Convert a line/UTF-16-column position to a byte offset.
     pub fn offset(&self, position: Position) -> Option<u32> {
-        let line_start = *self.line_starts.get(position.line as usize)?;
-        let offset = line_start + position.column;
+        let line = position.line as usize;
+        let line_start = *self.line_starts.get(line)? as usize;
+        let line_end = self
+            .line_starts
+            .get(line + 1)
+            .copied()
+            .unwrap_or(self.len) as usize;
+        let line_text = self.text.get(line_start..line_end)?;
 
-        if offset <= self.len {
-            Some(offset)
+        let mut utf16_column = 0u32;
+        for (byte_idx, ch) in line_text.char_indices() {
+            if utf16_column == position.column {
+                return Some((line_start + byte_idx) as u32);
+            }
+            utf16_column += ch.len_utf16() as u32;
+            if utf16_column > position.column {
+                // Position is in the middle of a UTF-16 surrogate pair.
+                return None;
+            }
+        }
+
+        if utf16_column == position.column {
+            Some(line_end as u32)
         } else {
             None
         }
@@ -152,6 +173,28 @@ impl LineIndex {
     /// Convert a TextRange to start/end positions.
     pub fn range_positions(&self, range: TextRange) -> (Position, Position) {
         (self.position(range.start()), self.position(range.end()))
+    }
+
+    fn utf16_column(&self, line_start: u32, offset: u32) -> u32 {
+        let start = line_start as usize;
+        let end = offset.min(self.len) as usize;
+        let mut consumed = start;
+        let mut column = 0u32;
+        let line = self.text.get(start..).unwrap_or("");
+
+        for ch in line.chars() {
+            let next = consumed + ch.len_utf8();
+            if next > end {
+                break;
+            }
+            consumed = next;
+            column += ch.len_utf16() as u32;
+            if consumed == end {
+                break;
+            }
+        }
+
+        column
     }
 }
 
@@ -197,6 +240,25 @@ mod tests {
             let back = idx.offset(pos).unwrap();
             assert_eq!(offset, back, "roundtrip failed for offset {offset}");
         }
+    }
+
+    #[test]
+    fn line_index_utf16_columns() {
+        let text = "a😀b\n";
+        let idx = LineIndex::new(text);
+
+        // Byte offsets 0,1,5,6 map to UTF-16 columns 0,1,3,4.
+        assert_eq!(idx.position(0), Position::new(0, 0));
+        assert_eq!(idx.position(1), Position::new(0, 1));
+        assert_eq!(idx.position(5), Position::new(0, 3));
+        assert_eq!(idx.position(6), Position::new(0, 4));
+
+        assert_eq!(idx.offset(Position::new(0, 0)), Some(0));
+        assert_eq!(idx.offset(Position::new(0, 1)), Some(1));
+        assert_eq!(idx.offset(Position::new(0, 3)), Some(5));
+        assert_eq!(idx.offset(Position::new(0, 4)), Some(6));
+        // Middle of surrogate pair is not a valid byte boundary.
+        assert_eq!(idx.offset(Position::new(0, 2)), None);
     }
 
     #[test]

@@ -104,6 +104,14 @@ impl PackageIndex {
             .unwrap_or_default()
     }
 
+    /// Find all definitions with the given name inside the specified parent scope.
+    pub fn find_definitions_in_parent(&self, name: &str, parent: &str) -> Vec<GlobalDefinition> {
+        self.find_all_definitions(name)
+            .into_iter()
+            .filter(|d| d.parent.as_deref() == Some(parent))
+            .collect()
+    }
+
     /// Get all definitions in this package.
     pub fn all_definitions(&self) -> Vec<GlobalDefinition> {
         self.definitions.values().flatten().cloned().collect()

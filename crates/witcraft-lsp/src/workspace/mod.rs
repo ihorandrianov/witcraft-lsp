@@ -9,13 +9,17 @@ mod package_index;
 mod resolver;
 
 pub use package_index::PackageIndex;
-pub use resolver::{AvailableType, CrossFileResolver, ResolveResult, SimilarName, UndefinedType};
+pub use resolver::{
+    AmbiguousCandidate, AmbiguousType, AvailableType, CrossFileResolver, ResolveResult,
+    SimilarName, UndefinedType,
+};
 
 use dashmap::DashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tracing::info;
+use tower_lsp::lsp_types::Url;
 use witcraft_syntax::{GlobalDefinition, PackageId, SymbolIndex};
 
 /// Manages workspace-level state including package indices and file mappings.
@@ -26,7 +30,7 @@ pub struct WorkspaceManager {
     /// Map from file URI to its package directory.
     file_to_package: DashMap<String, PathBuf>,
     /// Root folders of the workspace.
-    root_folders: Vec<PathBuf>,
+    root_folders: RwLock<Vec<PathBuf>>,
 }
 
 impl WorkspaceManager {
@@ -34,15 +38,29 @@ impl WorkspaceManager {
         Self {
             packages: DashMap::new(),
             file_to_package: DashMap::new(),
-            root_folders: Vec::new(),
+            root_folders: RwLock::new(Vec::new()),
         }
     }
 
     /// Initialize the workspace with the given root folders.
-    pub fn initialize(&mut self, folders: Vec<PathBuf>) {
-        self.root_folders = folders.clone();
+    pub fn initialize(&self, folders: Vec<PathBuf>) {
+        if let Ok(mut roots) = self.root_folders.write() {
+            *roots = folders.clone();
+        }
 
         for folder in folders {
+            self.scan_folder(&folder);
+        }
+    }
+
+    /// Rescan all known root folders.
+    pub fn rescan_roots(&self) {
+        let roots = self
+            .root_folders
+            .read()
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        for folder in roots {
             self.scan_folder(&folder);
         }
     }
@@ -69,6 +87,9 @@ impl WorkspaceManager {
             for file in &wit_files {
                 if file.parent() == Some(dir.as_path()) {
                     let uri = path_to_uri(file);
+                    if uri.is_empty() {
+                        continue;
+                    }
                     self.file_to_package.insert(uri.clone(), dir.clone());
                     if let Some(mut pkg) = self.packages.get_mut(&dir) {
                         pkg.add_file(uri);
@@ -173,6 +194,20 @@ impl WorkspaceManager {
         }
     }
 
+    /// Find imported definitions by interface + name in the same package.
+    pub fn find_imported_definitions(
+        &self,
+        uri: &str,
+        from_interface: &str,
+        name: &str,
+    ) -> Vec<GlobalDefinition> {
+        if let Some(pkg) = self.package_index_for_file(uri) {
+            pkg.find_definitions_in_parent(name, from_interface)
+        } else {
+            vec![]
+        }
+    }
+
     /// Get all definitions in the package.
     pub fn all_definitions(&self, uri: &str) -> Vec<GlobalDefinition> {
         if let Some(pkg) = self.package_index_for_file(uri) {
@@ -180,6 +215,15 @@ impl WorkspaceManager {
         } else {
             vec![]
         }
+    }
+
+    /// Get all definitions across all indexed packages in the workspace.
+    pub fn all_workspace_definitions(&self) -> Vec<GlobalDefinition> {
+        let mut defs = Vec::new();
+        for pkg in self.packages.iter() {
+            defs.extend(pkg.value().all_definitions());
+        }
+        defs
     }
 }
 
@@ -216,16 +260,14 @@ fn find_wit_files(dir: &Path) -> Vec<PathBuf> {
 
 /// Convert a file path to a file:// URI.
 fn path_to_uri(path: &Path) -> String {
-    format!("file://{}", path.display())
+    Url::from_file_path(path)
+        .map(|u| u.to_string())
+        .unwrap_or_default()
 }
 
 /// Convert a file:// URI to a path.
 fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    if uri.starts_with("file://") {
-        Some(PathBuf::from(&uri[7..]))
-    } else {
-        None
-    }
+    Url::parse(uri).ok()?.to_file_path().ok()
 }
 
 #[cfg(test)]
@@ -245,7 +287,11 @@ mod tests {
     #[test]
     fn test_workspace_manager_new() {
         let manager = WorkspaceManager::new();
-        assert!(manager.root_folders.is_empty());
+        assert!(manager
+            .root_folders
+            .read()
+            .map(|r| r.is_empty())
+            .unwrap_or(true));
         assert_eq!(manager.packages.len(), 0);
     }
 }

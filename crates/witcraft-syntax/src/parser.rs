@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lexer::{Token, lex};
+use crate::lexer::{lex, Token};
 use crate::parse::{ErrorKind, ParseError, ParseResult};
 use crate::{SyntaxKind, TextRange};
 use smallvec::smallvec;
@@ -375,7 +375,8 @@ impl<'a> Parser<'a> {
 
         let mut segments: SmallVec2<Ident> = smallvec![];
         let first = if self.at(SyntaxKind::Ident) {
-            self.parse_ident().unwrap()
+            self.parse_ident()
+                .unwrap_or_else(|| Ident::new("", TextRange::new(start, start)))
         } else {
             self.error_expected("package namespace (e.g., `wasi` in `wasi:http@1.0.0`)");
             Ident::new("", TextRange::new(start, start))
@@ -388,7 +389,12 @@ impl<'a> Parser<'a> {
 
         loop {
             let ident = if self.at(SyntaxKind::Ident) {
-                self.parse_ident().unwrap()
+                self.parse_ident().unwrap_or_else(|| {
+                    Ident::new(
+                        "",
+                        TextRange::new(self.current().range.start(), self.current().range.start()),
+                    )
+                })
             } else if self.at(SyntaxKind::At)
                 || self.at(SyntaxKind::Slash)
                 || self.at(SyntaxKind::Semicolon)
@@ -416,7 +422,9 @@ impl<'a> Parser<'a> {
                 let mut nested: SmallVec2<Ident> = smallvec![];
                 while self.eat(SyntaxKind::Slash).is_some() {
                     if self.at(SyntaxKind::Ident) {
-                        nested.push(self.parse_ident().unwrap());
+                        if let Some(ident) = self.parse_ident() {
+                            nested.push(ident);
+                        }
                     } else {
                         self.error_expected("nested package name after `/`");
                         break;

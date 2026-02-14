@@ -3,6 +3,7 @@
 //! WIT spec-compliant: types must be explicitly imported via `use` statements.
 
 use super::WorkspaceManager;
+use tracing::debug;
 use witcraft_syntax::{GlobalDefinition, Import, SymbolIndex};
 
 /// WIT builtin primitive types.
@@ -27,34 +28,56 @@ impl<'a> CrossFileResolver<'a> {
     /// 2. Check imported names (via `use` statements)
     /// 3. Check builtin types
     pub fn resolve_type(&self, uri: &str, name: &str, local_index: &SymbolIndex) -> ResolveResult {
-        // 1. Check local definitions first
-        if let Some(def) = local_index.find_definition(name) {
-            return ResolveResult::Found(GlobalDefinition::from_definition(def, uri));
-        }
+        let result = if let Some(def) = local_index.find_definition(name) {
+            ResolveResult::Found(GlobalDefinition::from_definition(def, uri))
+        } else if let Some(import) = local_index.find_import(name) {
+            self.resolve_import(uri, import)
+        } else if is_builtin_type(name) {
+            ResolveResult::Builtin
+        } else {
+            ResolveResult::NotFound
+        };
 
-        // 2. Check if name was imported via `use` statement
-        if let Some(import) = local_index.find_import(name) {
-            // Try to resolve the imported type to its definition
-            if let Some(def) = self.resolve_import(uri, import) {
-                return ResolveResult::Found(def);
-            }
-            // Import exists but we couldn't find the target - still valid as imported
-            return ResolveResult::Imported(import.clone());
-        }
-
-        // 3. Check if it's a builtin
-        if is_builtin_type(name) {
-            return ResolveResult::Builtin;
-        }
-
-        ResolveResult::NotFound
+        debug!(uri = %uri, name = %name, outcome = Self::resolve_outcome_label(&result));
+        result
     }
 
     /// Resolve an import to its actual definition.
-    fn resolve_import(&self, uri: &str, import: &Import) -> Option<GlobalDefinition> {
-        // Look up the original name in the workspace
-        // The import.from_interface tells us which interface to look in
-        self.workspace.find_definition(uri, &import.original_name)
+    fn resolve_import(&self, uri: &str, import: &Import) -> ResolveResult {
+        // Resolve strictly from the imported interface, not by global name only.
+        let mut candidates = self.workspace.find_imported_definitions(
+            uri,
+            &import.from_interface,
+            &import.original_name,
+        );
+
+        if candidates.is_empty() {
+            return ResolveResult::Imported(import.clone());
+        }
+
+        candidates.sort_by(|a, b| {
+            let by_uri = a.uri.cmp(&b.uri);
+            if by_uri != std::cmp::Ordering::Equal {
+                return by_uri;
+            }
+            a.name_range.start().cmp(&b.name_range.start())
+        });
+
+        if candidates.len() == 1 {
+            return ResolveResult::Found(candidates.remove(0));
+        }
+
+        ResolveResult::Ambiguous(candidates)
+    }
+
+    fn resolve_outcome_label(result: &ResolveResult) -> &'static str {
+        match result {
+            ResolveResult::Found(_) => "found",
+            ResolveResult::Imported(_) => "imported",
+            ResolveResult::Builtin => "builtin",
+            ResolveResult::Ambiguous(_) => "ambiguous",
+            ResolveResult::NotFound => "not_found",
+        }
     }
 
     /// Check if a type reference is valid (defined or builtin).
@@ -137,6 +160,42 @@ impl<'a> CrossFileResolver<'a> {
         undefined
     }
 
+    /// Get all ambiguous type references in a file.
+    pub fn find_ambiguous_types(&self, uri: &str, local_index: &SymbolIndex) -> Vec<AmbiguousType> {
+        let mut ambiguous = Vec::new();
+
+        for reference in local_index.references() {
+            if reference.kind != witcraft_syntax::ReferenceKind::Type || reference.name.is_empty() {
+                continue;
+            }
+
+            if let ResolveResult::Ambiguous(candidates) =
+                self.resolve_type(uri, &reference.name, local_index)
+            {
+                let mut options = Vec::new();
+                for def in candidates {
+                    let interface = def
+                        .parent
+                        .as_ref()
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "<root>".to_string());
+                    let file = def.uri.rsplit('/').next().unwrap_or(&def.uri).to_string();
+                    options.push(AmbiguousCandidate { interface, file });
+                }
+                options.sort_by(|a, b| a.interface.cmp(&b.interface).then(a.file.cmp(&b.file)));
+                options.dedup_by(|a, b| a.interface == b.interface && a.file == b.file);
+
+                ambiguous.push(AmbiguousType {
+                    name: reference.name.to_string(),
+                    range: reference.range,
+                    candidates: options,
+                });
+            }
+        }
+
+        ambiguous
+    }
+
     /// Find suggestions for an undefined type name.
     fn find_suggestions(
         &self,
@@ -203,6 +262,8 @@ pub enum ResolveResult {
     Imported(Import),
     /// Symbol is a builtin type (no location).
     Builtin,
+    /// Symbol resolves to multiple candidates.
+    Ambiguous(Vec<GlobalDefinition>),
     /// Symbol was not found.
     NotFound,
 }
@@ -224,6 +285,21 @@ pub struct UndefinedType {
     pub similar_names: Vec<SimilarName>,
     /// Interfaces where this type is defined but not imported.
     pub available_in: Vec<AvailableType>,
+}
+
+/// An ambiguous imported type reference with candidate definitions.
+#[derive(Debug, Clone)]
+pub struct AmbiguousType {
+    pub name: String,
+    pub range: witcraft_syntax::TextRange,
+    pub candidates: Vec<AmbiguousCandidate>,
+}
+
+/// A candidate location for an ambiguous type.
+#[derive(Debug, Clone)]
+pub struct AmbiguousCandidate {
+    pub interface: String,
+    pub file: String,
 }
 
 /// A similar name suggestion for typo correction.
@@ -586,5 +662,77 @@ mod tests {
         assert_eq!(undefined[0].name, "user");
         assert!(!undefined[0].available_in.is_empty());
         assert_eq!(undefined[0].available_in[0].interface, "types");
+    }
+
+    #[test]
+    fn test_import_resolution_is_interface_scoped() {
+        let types_source = r#"interface types {
+            record user { id: u64 }
+        }"#;
+        let other_source = r#"interface other {
+            record user { id: u64 }
+        }"#;
+        let api_source = r#"interface api {
+            use other.{user};
+            get-user: func() -> user;
+        }"#;
+
+        let types_result = parse(types_source);
+        let types_index = witcraft_syntax::SymbolIndex::build(&types_result.root);
+        let other_result = parse(other_source);
+        let other_index = witcraft_syntax::SymbolIndex::build(&other_result.root);
+        let api_result = parse(api_source);
+        let api_index = witcraft_syntax::SymbolIndex::build(&api_result.root);
+
+        let workspace = WorkspaceManager::new();
+        workspace.update_file_definitions("file:///pkg/types.wit", &types_index, None);
+        workspace.update_file_definitions("file:///pkg/other.wit", &other_index, None);
+        workspace.update_file_definitions("file:///pkg/api.wit", &api_index, None);
+
+        let resolver = CrossFileResolver::new(&workspace);
+        let resolved = resolver.resolve_type("file:///pkg/api.wit", "user", &api_index);
+
+        match resolved {
+            ResolveResult::Found(def) => {
+                assert_eq!(def.parent.as_deref(), Some("other"));
+                assert_eq!(def.uri, "file:///pkg/other.wit");
+            }
+            _ => panic!("expected imported type to resolve to interface `other`"),
+        }
+    }
+
+    #[test]
+    fn test_ambiguous_imported_type() {
+        let types_a_source = r#"interface types {
+            record user { id: u64 }
+        }"#;
+        let types_b_source = r#"interface types {
+            record user { id: u64 }
+        }"#;
+        let api_source = r#"interface api {
+            use types.{user};
+            get-user: func() -> user;
+        }"#;
+
+        let types_a_result = parse(types_a_source);
+        let types_a_index = witcraft_syntax::SymbolIndex::build(&types_a_result.root);
+        let types_b_result = parse(types_b_source);
+        let types_b_index = witcraft_syntax::SymbolIndex::build(&types_b_result.root);
+        let api_result = parse(api_source);
+        let api_index = witcraft_syntax::SymbolIndex::build(&api_result.root);
+
+        let workspace = WorkspaceManager::new();
+        workspace.update_file_definitions("file:///pkg/types-a.wit", &types_a_index, None);
+        workspace.update_file_definitions("file:///pkg/types-b.wit", &types_b_index, None);
+        workspace.update_file_definitions("file:///pkg/api.wit", &api_index, None);
+
+        let resolver = CrossFileResolver::new(&workspace);
+        let resolved = resolver.resolve_type("file:///pkg/api.wit", "user", &api_index);
+        assert!(matches!(resolved, ResolveResult::Ambiguous(_)));
+
+        let ambiguous = resolver.find_ambiguous_types("file:///pkg/api.wit", &api_index);
+        assert_eq!(ambiguous.len(), 1);
+        assert_eq!(ambiguous[0].name, "user");
+        assert!(ambiguous[0].candidates.len() >= 2);
     }
 }
