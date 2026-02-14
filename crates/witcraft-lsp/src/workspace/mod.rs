@@ -18,8 +18,8 @@ use dashmap::DashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use tracing::info;
 use tower_lsp::lsp_types::Url;
+use tracing::info;
 use witcraft_syntax::{GlobalDefinition, PackageId, SymbolIndex};
 
 /// Manages workspace-level state including package indices and file mappings.
@@ -287,11 +287,13 @@ mod tests {
     #[test]
     fn test_workspace_manager_new() {
         let manager = WorkspaceManager::new();
-        assert!(manager
-            .root_folders
-            .read()
-            .map(|r| r.is_empty())
-            .unwrap_or(true));
+        assert!(
+            manager
+                .root_folders
+                .read()
+                .map(|r| r.is_empty())
+                .unwrap_or(true)
+        );
         assert_eq!(manager.packages.len(), 0);
     }
 }

@@ -115,7 +115,10 @@ impl WitLanguageServer {
     }
 
     fn range_to_lsp_in_uri(&self, uri: &str, range: witcraft_syntax::TextRange) -> Option<Range> {
-        if let Some(doc_range) = self.documents.with_document(uri, |doc| doc.range_to_lsp(range)) {
+        if let Some(doc_range) = self
+            .documents
+            .with_document(uri, |doc| doc.range_to_lsp(range))
+        {
             return Some(doc_range);
         }
 
@@ -569,16 +572,14 @@ impl LanguageServer for WitLanguageServer {
 
             // Try local definition first
             if let Some(def) = index.find_definition(&name) {
-                return Some(LocalGoto::Found(
-                    Location::new(
-                        params
-                            .text_document_position_params
-                            .text_document
-                            .uri
-                            .clone(),
-                        doc.range_to_lsp(def.name_range),
-                    ),
-                ));
+                return Some(LocalGoto::Found(Location::new(
+                    params
+                        .text_document_position_params
+                        .text_document
+                        .uri
+                        .clone(),
+                    doc.range_to_lsp(def.name_range),
+                )));
             }
 
             Some(LocalGoto::NeedCrossFile(name))
@@ -602,7 +603,7 @@ impl LanguageServer for WitLanguageServer {
 
             // Use cross-file resolver
             let resolver = CrossFileResolver::new(&self.workspace);
-                match resolver.resolve_type(&uri, &search_name, &index) {
+            match resolver.resolve_type(&uri, &search_name, &index) {
                 crate::workspace::ResolveResult::Found(global_def) => {
                     // We found it in another file - need to get that file's line index
                     // For now, just return the raw range (will need adjustment)
@@ -1182,8 +1183,7 @@ impl LanguageServer for WitLanguageServer {
             )
         });
 
-        let Some((index, root, line_index, content, use_path_ranges, ambiguous_types)) =
-            context
+        let Some((index, root, line_index, content, use_path_ranges, ambiguous_types)) = context
         else {
             return Ok(None);
         };
@@ -1515,7 +1515,13 @@ impl LanguageServer for WitLanguageServer {
             a.name
                 .cmp(&b.name)
                 .then_with(|| a.location.uri.as_str().cmp(b.location.uri.as_str()))
-                .then_with(|| a.location.range.start.line.cmp(&b.location.range.start.line))
+                .then_with(|| {
+                    a.location
+                        .range
+                        .start
+                        .line
+                        .cmp(&b.location.range.start.line)
+                })
                 .then_with(|| {
                     a.location
                         .range
@@ -1967,8 +1973,11 @@ impl WitLanguageServer {
 
         let use_path_range = *use_path_range;
         for candidate in candidates {
-            let new_interface_name =
-                make_unique_interface_name(&import.from_interface, &candidate.file, &mut used_names);
+            let new_interface_name = make_unique_interface_name(
+                &import.from_interface,
+                &candidate.file,
+                &mut used_names,
+            );
 
             let Some(candidate_range) =
                 self.interface_name_range_in_uri(&candidate.uri, &candidate.interface)
@@ -3231,12 +3240,42 @@ mod tests {
     use crate::document::DocumentStore;
     use serde_json::json;
     use std::fs;
+    use std::future::Future;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::task::Poll;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tower::{Service, ServiceExt};
     use tower_lsp::ClientSocket;
     use tower_lsp::LspService;
     use tower_lsp::jsonrpc::{Request, Response};
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+    async fn with_test_timeout<F, T>(future: F, context: String) -> T
+    where
+        F: Future<Output = T>,
+    {
+        let started = Instant::now();
+        tokio::pin!(future);
+
+        loop {
+            if started.elapsed() > TEST_TIMEOUT {
+                panic!("timed out after {:?}: {context}", TEST_TIMEOUT);
+            }
+
+            let maybe_output = std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+                Poll::Ready(output) => Poll::Ready(Some(output)),
+                Poll::Pending => Poll::Ready(None),
+            })
+            .await;
+
+            if let Some(output) = maybe_output {
+                return output;
+            }
+
+            tokio::task::yield_now().await;
+        }
+    }
 
     fn make_store_with_doc(content: &str) -> DocumentStore {
         let store = DocumentStore::new();
@@ -4421,7 +4460,13 @@ interface internal {}"#;
             .params(json!({ "capabilities": {} }))
             .id(1)
             .finish();
-        let response = service.ready().await.unwrap().call(initialize).await.unwrap();
+        let response = service
+            .ready()
+            .await
+            .unwrap()
+            .call(initialize)
+            .await
+            .unwrap();
         assert!(response.is_some());
         (service, socket)
     }
@@ -4437,7 +4482,13 @@ interface internal {}"#;
             }))
             .id(1)
             .finish();
-        let response = service.ready().await.unwrap().call(initialize).await.unwrap();
+        let response = service
+            .ready()
+            .await
+            .unwrap()
+            .call(initialize)
+            .await
+            .unwrap();
         assert!(response.is_some());
         (service, socket)
     }
@@ -4459,14 +4510,12 @@ interface internal {}"#;
         params: serde_json::Value,
     ) -> serde_json::Value {
         let req = Request::build(method).params(params).id(id).finish();
-        let response = service
-            .ready()
-            .await
-            .unwrap()
-            .call(req)
-            .await
-            .unwrap()
-            .expect("request should return a response");
+        let response = with_test_timeout(
+            async { service.ready().await.unwrap().call(req).await.unwrap() },
+            format!("waiting for response to `{method}`"),
+        )
+        .await
+        .expect("request should return a response");
         response.result().cloned().expect("request should succeed")
     }
 
@@ -4484,19 +4533,29 @@ interface internal {}"#;
         socket: &mut ClientSocket,
         uri: &str,
     ) -> Option<PublishDiagnosticsParams> {
-        loop {
-            let req = std::future::poll_fn(|cx| {
-                futures_core::stream::Stream::poll_next(std::pin::Pin::new(&mut *socket), cx)
-            })
-            .await?;
-            if req.method() != "textDocument/publishDiagnostics" {
-                continue;
-            }
-            let params: PublishDiagnosticsParams = serde_json::from_value(req.params()?.clone()).ok()?;
-            if params.uri.to_string() == uri {
-                return Some(params);
-            }
-        }
+        with_test_timeout(
+            async {
+                loop {
+                    let req = std::future::poll_fn(|cx| {
+                        futures_core::stream::Stream::poll_next(
+                            std::pin::Pin::new(&mut *socket),
+                            cx,
+                        )
+                    })
+                    .await?;
+                    if req.method() != "textDocument/publishDiagnostics" {
+                        continue;
+                    }
+                    let params: PublishDiagnosticsParams =
+                        serde_json::from_value(req.params()?.clone()).ok()?;
+                    if params.uri.to_string() == uri {
+                        return Some(params);
+                    }
+                }
+            },
+            format!("waiting for diagnostics for `{uri}`"),
+        )
+        .await
     }
 
     fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
@@ -4935,7 +4994,9 @@ interface internal {}"#;
         let action = actions
             .iter()
             .find_map(|action| match action {
-                CodeActionOrCommand::CodeAction(action) => action.edit.as_ref().map(|edit| (action, edit)),
+                CodeActionOrCommand::CodeAction(action) => {
+                    action.edit.as_ref().map(|edit| (action, edit))
+                }
                 _ => None,
             })
             .expect("expected code action with edit");
@@ -5179,7 +5240,8 @@ interface api {
         );
 
         assert!(
-            updated.contains("interface api {\n    use types.{user};\n    get-user: func() -> user;"),
+            updated
+                .contains("interface api {\n    use types.{user};\n    get-user: func() -> user;"),
             "import should be inserted inside the interface that has the undefined type; updated:\n{}",
             updated
         );
@@ -5915,8 +5977,7 @@ interface api {
             json!({ "query": "local" }),
         )
         .await;
-        let local_symbols: Vec<SymbolInformation> =
-            serde_json::from_value(local_symbols).unwrap();
+        let local_symbols: Vec<SymbolInformation> = serde_json::from_value(local_symbols).unwrap();
         assert!(
             local_symbols
                 .iter()

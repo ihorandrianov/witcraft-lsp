@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lexer::{lex, Token};
+use crate::lexer::{Token, lex};
 use crate::parse::{ErrorKind, ParseError, ParseResult};
 use crate::{SyntaxKind, TextRange};
 use smallvec::smallvec;

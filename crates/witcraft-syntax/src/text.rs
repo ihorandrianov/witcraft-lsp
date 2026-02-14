@@ -118,11 +118,7 @@ impl LineIndex {
     pub fn offset(&self, position: Position) -> Option<u32> {
         let line = position.line as usize;
         let line_start = *self.line_starts.get(line)? as usize;
-        let line_end = self
-            .line_starts
-            .get(line + 1)
-            .copied()
-            .unwrap_or(self.len) as usize;
+        let line_end = self.line_starts.get(line + 1).copied().unwrap_or(self.len) as usize;
         let line_text = self.text.get(line_start..line_end)?;
 
         let mut utf16_column = 0u32;

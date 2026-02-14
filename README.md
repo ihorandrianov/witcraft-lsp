@@ -1,63 +1,44 @@
-# Witcraft LSP
+# wit-lsp
 
-Witcraft LSP provides Language Server Protocol support for WIT (WebAssembly Interface Types) files.
+Language Server Protocol implementation for WIT (WebAssembly Interface Types), plus editor integration assets.
 
-## Install
+## Repository layout
 
-### VS Code
+- `crates/witcraft-syntax`: lexer, parser, formatter, symbol index, and syntax tests.
+- `crates/witcraft-lsp`: LSP server implementation (`witcraft-lsp` binary).
+- `editors/vscode`: VS Code extension that starts and configures the server.
+- `examples`: sample `.wit` files used for development and tests.
 
-Install the extension from the VS Code Marketplace or Open VSX.
+## Features
 
-The extension downloads the correct `witcraft-lsp` binary on first launch and caches it in the extension storage. You can override the server path in settings.
+- Parsing and diagnostics for WIT files.
+- Navigation: definition, references, hover, document/workspace symbols.
+- Editing support: rename, formatting, semantic tokens, code actions, inlay hints.
+- Cross-file and workspace-level indexing for package-aware resolution.
 
-Settings:
+## Build and test
 
-- `wit-lsp.server.path`: Use a local `witcraft-lsp` binary instead of downloading.
-- `wit-lsp.server.releaseChannel`: Release channel to download (default: `latest`).
-- `wit-lsp.server.version`: Pin a specific version (example: `v0.2.0`).
-
-### Neovim
-
-1) Download the archive for your platform from GitHub Releases.
-2) Extract the `witcraft-lsp` binary into a directory on your PATH.
-3) Ensure it is executable (`chmod +x` on macOS/Linux).
-
-Minimal `nvim-lspconfig` setup:
-
-```lua
-local lspconfig = require('lspconfig')
-local configs = require('lspconfig.configs')
-
-if not configs.witcraft_lsp then
-  configs.witcraft_lsp = {
-    default_config = {
-      cmd = { 'witcraft-lsp' },
-      filetypes = { 'wit' },
-      root_dir = lspconfig.util.root_pattern('.git'),
-    },
-  }
-end
-
-lspconfig.witcraft_lsp.setup({})
-```
-
-## Manual Install
-
-Release assets are published per platform:
-
-- `witcraft-lsp-vX.Y.Z-macos-x64.tar.gz`
-- `witcraft-lsp-vX.Y.Z-macos-arm64.tar.gz`
-- `witcraft-lsp-vX.Y.Z-linux-x64.tar.gz`
-- `witcraft-lsp-vX.Y.Z-linux-arm64.tar.gz`
-- `witcraft-lsp-vX.Y.Z-windows-x64.zip`
-
-Checksum verification:
+From repository root:
 
 ```bash
-shasum -a 256 -c SHA256SUMS
+cargo test
+cargo build --release -p witcraft-lsp
 ```
 
-## Troubleshooting
+VS Code extension checks:
 
-- If the extension cannot download the server, set `wit-lsp.server.path` to a local binary.
-- If you use a proxy or restricted network, download the release asset manually and configure `wit-lsp.server.path`.
+```bash
+npm --prefix editors/vscode ci
+npm --prefix editors/vscode run typecheck
+npm --prefix editors/vscode run package
+```
+
+## Release assets
+
+Release workflow publishes platform-specific `witcraft-lsp` binaries and checksums from Git tags (`v*`), and also packages a VSIX extension artifact.
+
+See `RELEASE_CHECKLIST.md` for the expected release process.
+
+## License
+
+This project is dual-licensed under MIT and Apache-2.0 where applicable. See crate metadata and `editors/vscode/LICENSE`.
