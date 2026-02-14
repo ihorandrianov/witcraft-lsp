@@ -4100,6 +4100,10 @@ interface internal {}"#;
         Url::from_file_path(path).unwrap().to_string()
     }
 
+    fn folder_uri(path: &Path) -> String {
+        Url::from_directory_path(path).unwrap().to_string()
+    }
+
     fn write_file(path: &Path, content: &str) {
         fs::write(path, content).unwrap();
     }
@@ -4108,6 +4112,22 @@ interface internal {}"#;
         let (mut service, socket) = LspService::new(WitLanguageServer::new);
         let initialize = Request::build("initialize")
             .params(json!({ "capabilities": {} }))
+            .id(1)
+            .finish();
+        let response = service.ready().await.unwrap().call(initialize).await.unwrap();
+        assert!(response.is_some());
+        (service, socket)
+    }
+
+    async fn init_service_with_folders(
+        workspace_folders: Vec<WorkspaceFolder>,
+    ) -> (LspService<WitLanguageServer>, ClientSocket) {
+        let (mut service, socket) = LspService::new(WitLanguageServer::new);
+        let initialize = Request::build("initialize")
+            .params(json!({
+                "capabilities": {},
+                "workspaceFolders": workspace_folders
+            }))
             .id(1)
             .finish();
         let response = service.ready().await.unwrap().call(initialize).await.unwrap();
@@ -4980,5 +5000,371 @@ interface internal {}"#;
         assert_eq!(rename, serde_json::Value::Null);
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn regression_file_churn_create_change_delete() {
+        let root = unique_test_dir("file-churn-create-change-delete");
+        let api_path = root.join("api.wit");
+        let types_path = root.join("types.wit");
+
+        let api_content = r#"interface api {
+    use types.{user};
+    get-user: func() -> user;
+}"#;
+        let types_content = r#"interface types {
+    record user {
+        id: u64,
+    }
+}"#;
+
+        write_file(&api_path, api_content);
+
+        let api_uri = file_uri(&api_path);
+        let types_uri = file_uri(&types_path);
+        let (mut service, _) = init_service().await;
+
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": api_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": api_content
+                }
+            }),
+        )
+        .await;
+
+        let initial_def = send_request(
+            &mut service,
+            17,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": { "line": 2, "character": 24 }
+            }),
+        )
+        .await;
+        assert_eq!(initial_def, serde_json::Value::Null);
+
+        write_file(&types_path, types_content);
+        send_notification(
+            &mut service,
+            "workspace/didChangeWatchedFiles",
+            json!({
+                "changes": [
+                    { "uri": types_uri, "type": 1 }
+                ]
+            }),
+        )
+        .await;
+
+        send_notification(
+            &mut service,
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": api_uri, "version": 2 },
+                "contentChanges": [{ "text": api_content }]
+            }),
+        )
+        .await;
+
+        let definition = send_request(
+            &mut service,
+            18,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": { "line": 2, "character": 24 }
+            }),
+        )
+        .await;
+        let location: Location = serde_json::from_value(definition).unwrap();
+        assert_eq!(location.uri.to_string(), types_uri);
+
+        let types_changed = r#"interface types {
+    record account {
+        id: u64,
+    }
+}"#;
+        write_file(&types_path, types_changed);
+        send_notification(
+            &mut service,
+            "workspace/didChangeWatchedFiles",
+            json!({
+                "changes": [
+                    { "uri": types_uri, "type": 2 }
+                ]
+            }),
+        )
+        .await;
+
+        send_notification(
+            &mut service,
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": api_uri, "version": 3 },
+                "contentChanges": [{ "text": api_content }]
+            }),
+        )
+        .await;
+
+        let def_after_change = send_request(
+            &mut service,
+            19,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": { "line": 2, "character": 24 }
+            }),
+        )
+        .await;
+        assert_eq!(def_after_change, serde_json::Value::Null);
+
+        fs::remove_file(&types_path).ok();
+        send_notification(
+            &mut service,
+            "workspace/didChangeWatchedFiles",
+            json!({
+                "changes": [
+                    { "uri": types_uri, "type": 3 }
+                ]
+            }),
+        )
+        .await;
+
+        send_notification(
+            &mut service,
+            "textDocument/didChange",
+            json!({
+                "textDocument": { "uri": api_uri, "version": 4 },
+                "contentChanges": [{ "text": api_content }]
+            }),
+        )
+        .await;
+
+        let def_after_delete = send_request(
+            &mut service,
+            20,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": { "line": 2, "character": 24 }
+            }),
+        )
+        .await;
+        assert_eq!(def_after_delete, serde_json::Value::Null);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn regression_file_churn_rename_updates_targets() {
+        let root = unique_test_dir("file-churn-rename");
+        let api_path = root.join("api.wit");
+        let types_path = root.join("types.wit");
+        let models_path = root.join("models.wit");
+
+        let api_content = r#"interface api {
+    use types.{user};
+    get-user: func() -> user;
+}"#;
+        let types_content = r#"interface types {
+    record user {
+        id: u64,
+    }
+}"#;
+
+        write_file(&api_path, api_content);
+        write_file(&types_path, types_content);
+
+        let api_uri = file_uri(&api_path);
+        let types_uri = file_uri(&types_path);
+        let models_uri = file_uri(&models_path);
+        let (mut service, _) = init_service().await;
+
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": api_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": api_content
+                }
+            }),
+        )
+        .await;
+
+        send_notification(
+            &mut service,
+            "workspace/didChangeWatchedFiles",
+            json!({
+                "changes": [
+                    { "uri": types_uri, "type": 1 }
+                ]
+            }),
+        )
+        .await;
+
+        let definition = send_request(
+            &mut service,
+            19,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": { "line": 2, "character": 24 }
+            }),
+        )
+        .await;
+        let location: Location = serde_json::from_value(definition).unwrap();
+        assert_eq!(location.uri.to_string(), types_uri);
+
+        fs::rename(&types_path, &models_path).unwrap();
+        send_notification(
+            &mut service,
+            "workspace/didChangeWatchedFiles",
+            json!({
+                "changes": [
+                    { "uri": types_uri, "type": 3 },
+                    { "uri": models_uri, "type": 1 }
+                ]
+            }),
+        )
+        .await;
+
+        let definition_after = send_request(
+            &mut service,
+            20,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": { "line": 2, "character": 24 }
+            }),
+        )
+        .await;
+        let location_after: Location = serde_json::from_value(definition_after).unwrap();
+        assert_eq!(location_after.uri.to_string(), models_uri);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn regression_multi_root_workspace_symbol_and_boundaries() {
+        let root_a = unique_test_dir("multi-root-a");
+        let root_b = unique_test_dir("multi-root-b");
+
+        let api_path = root_a.join("api.wit");
+        let types_path = root_b.join("types.wit");
+
+        let api_content = r#"interface api {
+    record local {
+        id: u64,
+    }
+    use types.{user};
+    get-user: func() -> user;
+}"#;
+        let types_content = r#"interface types {
+    record user {
+        id: u64,
+    }
+}"#;
+
+        write_file(&api_path, api_content);
+        write_file(&types_path, types_content);
+
+        let api_uri = file_uri(&api_path);
+        let types_uri = file_uri(&types_path);
+
+        let folders = vec![
+            WorkspaceFolder {
+                uri: Url::parse(&folder_uri(&root_a)).unwrap(),
+                name: "root-a".to_string(),
+            },
+            WorkspaceFolder {
+                uri: Url::parse(&folder_uri(&root_b)).unwrap(),
+                name: "root-b".to_string(),
+            },
+        ];
+
+        let (mut service, _) = init_service_with_folders(folders).await;
+
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": api_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": api_content
+                }
+            }),
+        )
+        .await;
+
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": types_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": types_content
+                }
+            }),
+        )
+        .await;
+
+        let user_symbols = send_request(
+            &mut service,
+            21,
+            "workspace/symbol",
+            json!({ "query": "user" }),
+        )
+        .await;
+        let user_symbols: Vec<SymbolInformation> = serde_json::from_value(user_symbols).unwrap();
+        assert!(
+            user_symbols
+                .iter()
+                .any(|symbol| symbol.name == "user" && symbol.location.uri.to_string() == types_uri),
+            "workspace/symbol should include types from second root"
+        );
+
+        let local_symbols = send_request(
+            &mut service,
+            22,
+            "workspace/symbol",
+            json!({ "query": "local" }),
+        )
+        .await;
+        let local_symbols: Vec<SymbolInformation> =
+            serde_json::from_value(local_symbols).unwrap();
+        assert!(
+            local_symbols
+                .iter()
+                .any(|symbol| symbol.name == "local" && symbol.location.uri.to_string() == api_uri),
+            "workspace/symbol should include types from first root"
+        );
+
+        let def = send_request(
+            &mut service,
+            23,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": { "line": 5, "character": 24 }
+            }),
+        )
+        .await;
+        assert_eq!(def, serde_json::Value::Null);
+
+        fs::remove_dir_all(root_a).ok();
+        fs::remove_dir_all(root_b).ok();
     }
 }
