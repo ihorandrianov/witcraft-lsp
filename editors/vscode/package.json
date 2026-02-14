@@ -100,9 +100,5 @@
     "typescript": "^5.0.0",
     "@vscode/vsce": "^2.22.0",
     "ovsx": "^0.10.9"
-  },
-  "overrides": {
-    "cheerio": "1.0.0-rc.12",
-    "undici": "5.28.4"
   }
 }
