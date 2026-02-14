@@ -127,7 +127,7 @@ jobs:
 
       - name: Verify tag matches extension version
         working-directory: editors/vscode
-        run: node -e "const v=require('./package.json').version; const tag=process.env.GITHUB_REF_NAME; if(tag !== `v${v}`) { throw new Error(`Tag ${tag} does not match extension version v${v}`); }"
+        run: node -e 'const v=require("./package.json").version; const tag=process.env.GITHUB_REF_NAME; if (tag !== `v${v}`) { throw new Error(`Tag ${tag} does not match extension version v${v}`); }'
 
       - name: Install dependencies
         working-directory: editors/vscode
