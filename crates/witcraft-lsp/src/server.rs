@@ -4896,4 +4896,89 @@ interface internal {}"#;
             "malformed URI should produce a JSON-RPC error response"
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn regression_invalid_positions_return_none() {
+        let root = unique_test_dir("invalid-positions");
+        let api_path = root.join("api.wit");
+        let api_content = r#"interface api {
+    record user {
+        id: u64,
+    }
+    get-user: func() -> user;
+}"#;
+
+        write_file(&api_path, api_content);
+
+        let api_uri = file_uri(&api_path);
+        let (mut service, _) = init_service().await;
+
+        send_notification(
+            &mut service,
+            "textDocument/didOpen",
+            json!({
+                "textDocument": {
+                    "uri": api_uri,
+                    "languageId": "wit",
+                    "version": 1,
+                    "text": api_content
+                }
+            }),
+        )
+        .await;
+
+        let invalid_position = json!({ "line": 999, "character": 999 });
+
+        let def = send_request(
+            &mut service,
+            13,
+            "textDocument/definition",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": invalid_position
+            }),
+        )
+        .await;
+        assert_eq!(def, serde_json::Value::Null);
+
+        let refs = send_request(
+            &mut service,
+            14,
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": invalid_position,
+                "context": { "includeDeclaration": true }
+            }),
+        )
+        .await;
+        assert_eq!(refs, serde_json::Value::Null);
+
+        let hover = send_request(
+            &mut service,
+            15,
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": invalid_position
+            }),
+        )
+        .await;
+        assert_eq!(hover, serde_json::Value::Null);
+
+        let rename = send_request(
+            &mut service,
+            16,
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": api_uri },
+                "position": invalid_position,
+                "newName": "renamed"
+            }),
+        )
+        .await;
+        assert_eq!(rename, serde_json::Value::Null);
+
+        fs::remove_dir_all(root).ok();
+    }
 }
